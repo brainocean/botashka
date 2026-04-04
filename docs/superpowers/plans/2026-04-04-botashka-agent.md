@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a local Babashka-native agentic assistant that uses generated Clojure snippets as its action space, with a self-growing tool library, hybrid plan+ReAct loop, and streaming TUI.
+**Goal:** Build a local Babashka-native agentic assistant that uses generated Clojure snippets as its action space, with a self-growing tool library, hybrid plan+ReAct loop, and a REPL-first interface.
 
-**Architecture:** The agent core has three layers — Planner (writes bb.edn tasks), ReAct loop (THINK→GENERATE→EXECUTE→OBSERVE), and Spec Validator (gates all generated code). A core.async channel bus decouples the TUI adapter from the agent, enabling future UI adapters with zero core changes.
+**Architecture:** The agent core has three layers — Planner (writes bb.edn tasks), ReAct loop (THINK→GENERATE→EXECUTE→OBSERVE), and Spec Validator (gates all generated code). V1 uses the Babashka nREPL (`bb nrepl-server`) as the interaction model — zero TUI code needed. The channel bus is used internally for LLM streaming; a full TUI adapter is out of scope for v1.
 
 **Tech Stack:** Babashka (bb), clojure.spec.alpha, core.async (SCI subset + future for blocking I/O), babashka.http-client, babashka.tasks, Anthropic Claude API (SSE streaming), cheshire (JSON)
 
@@ -15,9 +15,8 @@
 | File | Responsibility |
 |---|---|
 | `bb.edn` | Project config + live agent task plan (agent writes `:tasks` here) |
-| `src/botashka/core.clj` | Entry point — initialises channel bus, starts TUI, starts main loop |
+| `src/botashka/core.clj` | REPL-friendly API — `plan!`, `run-all!`, `run-tool`, `status` functions |
 | `src/botashka/llm.clj` | Claude API client — chat completion + SSE streaming via `future` |
-| `src/botashka/tui.clj` | stdin/stdout TUI adapter — reads `:human-in`, writes `:human-out` |
 | `src/botashka/planner.clj` | Decomposes goal → writes `:tasks` into bb.edn via LLM |
 | `src/botashka/tools.clj` | Tool library management — load, save, list, update index |
 | `src/botashka/spec.clj` | Spec validation helpers — conform generated source, report errors |
@@ -28,6 +27,8 @@
 | `test/botashka/spec_test.clj` | Tests for spec validation helpers |
 | `test/botashka/planner_test.clj` | Tests for bb.edn task writing |
 | `test/botashka/react_test.clj` | Tests for ReAct loop decision routing |
+
+**Out of scope for v1:** `src/botashka/tui.clj` — deferred; REPL is the v1 interface.
 
 ---
 
@@ -697,100 +698,22 @@ git commit -m "feat: ReAct loop — THINK/GENERATE/EXECUTE/OBSERVE with spec gat
 
 ---
 
-## Task 7: TUI adapter
-
-**Files:**
-- Create: `src/botashka/tui.clj`
-
-The TUI reads `:human-in` channel for user input and writes `:human-out` for output. It handles the 4 message types: `:token` (print inline), `:done` (newline + re-prompt), `:info` (status line), `:ask` (prompt user, put reply on `:human-in`).
-
-- [ ] **Step 1: Implement tui.clj**
-
-Create `src/botashka/tui.clj`:
-
-```clojure
-(ns botashka.tui
-  (:require [clojure.core.async :as async]))
-
-(def prompt "> ")
-
-(defn print-prompt []
-  (print prompt)
-  (flush))
-
-(defn start-output-loop!
-  "Start a go-loop that reads from out-ch and renders to stdout.
-  Returns a channel that closes when out-ch closes."
-  [out-ch]
-  (async/go-loop []
-    (when-let [msg (async/<! out-ch)]
-      (case (:type msg)
-        :token (do (print (:text msg)) (flush))
-        :done  (do (println) (print-prompt))
-        :info  (println "\n[" (:text msg) "]")
-        :ask   (do (println)
-                   (println (:text msg))
-                   (print-prompt)))
-      (recur))))
-
-(defn start-input-loop!
-  "Start a future that reads stdin lines and puts them onto in-ch.
-  Stops when EOF is reached."
-  [in-ch]
-  (future
-    (loop []
-      (when-let [line (try (read-line) (catch Exception _ nil))]
-        (async/>!! in-ch {:type :input :text line})
-        (recur)))
-    (async/close! in-ch)))
-
-(defn start!
-  "Start TUI: launches input and output loops. Returns {:in-ch … :out-ch …}."
-  []
-  (let [in-ch  (async/chan 32)
-        out-ch (async/chan 1024)]
-    (start-output-loop! out-ch)
-    (start-input-loop! in-ch)
-    {:in-ch in-ch :out-ch out-ch}))
-```
-
-- [ ] **Step 2: Manual smoke test**
-
-Add a temporary test entry to bb.edn tasks:
-
-```clojure
-tui-test {:doc "Smoke test TUI"
-          :task (do (require '[botashka.tui :as tui])
-                    (require '[clojure.core.async :as async])
-                    (let [{:keys [in-ch out-ch]} (tui/start!)]
-                      (async/>!! out-ch {:type :info :text "TUI started"})
-                      (async/>!! out-ch {:type :token :text "Hello "})
-                      (async/>!! out-ch {:type :token :text "streaming"})
-                      (async/>!! out-ch {:type :done})
-                      (Thread/sleep 500)))}
-```
-
-Run: `bb tui-test`
-Expected: `[ TUI started ]` then `Hello streaming` printed inline, then newline and prompt.
-
-Remove the test task from bb.edn after verification.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/botashka/tui.clj
-git commit -m "feat: TUI adapter — streaming output, stdin input, channel protocol"
-```
-
----
-
-## Task 8: Wire up core entry point
+## Task 7: REPL-friendly core API
 
 **Files:**
 - Modify: `src/botashka/core.clj`
 - Modify: `bb.edn`
 
-Core initialises the channel bus, starts TUI, reads `ANTHROPIC_API_KEY` from env, and runs the main goal→plan→execute loop.
+V1 interaction is the Babashka nREPL. `core.clj` exposes clean, REPL-callable functions. LLM streaming prints tokens directly to stdout via `future` — no channel bus needed at this layer. The user workflow is:
+
+```clojure
+(require '[botashka.core :as b])
+(b/plan! "Fetch SAP notes from this URL and save as CSV")
+;; inspect bb.edn, then:
+(b/run-all!)
+;; or run a single step:
+(b/run-step! 'fetch-notes)
+```
 
 - [ ] **Step 1: Implement core.clj**
 
@@ -798,9 +721,8 @@ Replace `src/botashka/core.clj` with:
 
 ```clojure
 (ns botashka.core
-  (:require [clojure.core.async :as async]
-            [babashka.tasks :as bt]
-            [botashka.tui :as tui]
+  (:require [babashka.tasks :as bt]
+            [clojure.edn :as edn]
             [botashka.planner :as planner]
             [botashka.react :as react]
             [botashka.tools :as tools]))
@@ -808,89 +730,116 @@ Replace `src/botashka/core.clj` with:
 (def tools-dir "tools")
 (def bb-edn-path "bb.edn")
 
-(defn run-tool
-  "Helper available in bb.edn :init — triggers ReAct loop for a tool with args.
-  Designed to be called from within a bb.edn task body."
-  [tool-name args]
-  (let [api-key (System/getenv "ANTHROPIC_API_KEY")
-        out-ch  (async/chan 1024)]
-    ;; drain out-ch to stdout synchronously for task context
-    (async/thread
-      (loop []
-        (when-let [msg (async/<!! out-ch)]
-          (case (:type msg)
-            :token (do (print (:text msg)) (flush))
-            :done  (println)
-            :info  (println "[" (:text msg) "]")
-            nil)
-          (recur))))
-    (react/react-step! {:task-doc  (name tool-name)
+(defn- api-key []
+  (or (System/getenv "ANTHROPIC_API_KEY")
+      (throw (ex-info "ANTHROPIC_API_KEY environment variable not set" {}))))
+
+(defn plan!
+  "Decompose goal into steps and write them into bb.edn.
+  Returns the tasks map so the user can inspect before running.
+  Example: (plan! \"Fetch SAP notes and save as CSV\")"
+  [goal]
+  (let [tasks (planner/plan! goal (api-key) bb-edn-path)]
+    (println "Plan written to bb.edn with" (count tasks) "steps:")
+    (doseq [[k v] tasks]
+      (println " " k "-" (:doc v)))
+    tasks))
+
+(defn run-step!
+  "Run a single named task step through the ReAct loop.
+  Example: (run-step! 'fetch-notes)"
+  [task-name]
+  (let [bb-edn  (edn/read-string (slurp bb-edn-path))
+        task    (get-in bb-edn [:tasks task-name])
+        doc     (:doc task (name task-name))]
+    (react/react-step! {:task-doc  doc
                         :history   []
                         :tools-dir tools-dir
-                        :api-key   api-key
-                        :out-ch    out-ch})))
+                        :api-key   (api-key)
+                        :out-ch    nil})))
 
-(defn execute-plan!
-  "Execute all tasks in bb.edn in dependency order."
-  [task-names]
-  (doseq [task-name task-names]
-    (bt/run task-name)))
+(defn run-all!
+  "Execute all tasks in bb.edn in dependency order via babashka.tasks/run.
+  Example: (run-all!)"
+  []
+  (let [bb-edn (edn/read-string (slurp bb-edn-path))
+        tasks  (keys (:tasks bb-edn))]
+    (println "Executing" (count tasks) "tasks...")
+    (doseq [task-name tasks]
+      (println "\n→" task-name)
+      (bt/run task-name))))
 
-(defn -main [& _args]
-  (let [api-key (System/getenv "ANTHROPIC_API_KEY")]
-    (when-not api-key
-      (println "Error: ANTHROPIC_API_KEY environment variable not set.")
-      (System/exit 1))
-    (let [{:keys [in-ch out-ch]} (tui/start!)]
-      (async/>!! out-ch {:type :info :text "Botashka ready. Enter your goal:"})
-      (async/>!! out-ch {:type :done})
-      (loop [history []]
-        (when-let [msg (async/<!! in-ch)]
-          (let [goal (:text msg)
-                _    (async/>!! out-ch {:type :info :text (str "Planning: " goal)})
-                tasks (planner/plan! goal api-key bb-edn-path)]
-            (if tasks
-              (do
-                (async/>!! out-ch {:type :info :text (str "Plan written with " (count tasks) " steps. Executing...")})
-                (execute-plan! (keys tasks))
-                (async/>!! out-ch {:type :done}))
-              (async/>!! out-ch {:type :info :text "Planning failed — could not parse LLM response."})))
-          (recur history))))))
+(defn run-tool
+  "Helper called from within bb.edn task bodies — triggers ReAct loop.
+  Streams token output directly to stdout.
+  Example in bb.edn: (run-tool 'fetch-url {:url \"http://example.com\"})"
+  [tool-name args]
+  (let [result (react/react-step! {:task-doc  (name tool-name)
+                                   :history   []
+                                   :tools-dir tools-dir
+                                   :api-key   (api-key)
+                                   :out-ch    nil})]
+    (when-let [output (:result result)]
+      (print output)
+      (flush))
+    result))
+
+(defn status
+  "Show current tool library and pending bb.edn tasks.
+  Example: (status)"
+  []
+  (println "=== Tool Library ===")
+  (doseq [t (tools/list-tools tools-dir)]
+    (let [meta (get (tools/load-index tools-dir) t)]
+      (println " " t "-" (:description meta))))
+  (println "\n=== Current Plan (bb.edn tasks) ===")
+  (let [bb-edn (edn/read-string (slurp bb-edn-path))]
+    (doseq [[k v] (:tasks bb-edn)]
+      (println " " k "-" (:doc v)))))
 ```
 
-- [ ] **Step 2: Update bb.edn with :init for run-tool**
-
-Update the `:tasks` `run` entry in `bb.edn`:
+- [ ] **Step 2: Update bb.edn**
 
 ```clojure
-{:paths ["src"]
+{:paths ["src" "test"]
  :deps  {org.clojure/core.async {:mvn/version "1.6.681"}
          cheshire/cheshire      {:mvn/version "5.12.0"}}
  :init  (require '[botashka.core :refer [run-tool]])
- :tasks {run {:doc  "Start Botashka agent"
-              :task (require '[botashka.core :as core]) (-main)}}}
+ :tasks {repl  {:doc  "Start Babashka nREPL server for interactive use"
+                :task (do (println "Starting nREPL on port 1667...")
+                          (babashka.nrepl.server/start-server! {:host "localhost" :port 1667})
+                          (println "Connect with: bb --nrepl-port 1667 or your editor's nREPL client")
+                          @(promise))}
+         test  {:doc  "Run all tests"
+                :task (babashka.test/test-runner ["test"])}}}
 ```
 
-- [ ] **Step 3: End-to-end smoke test**
+- [ ] **Step 3: Verify REPL starts**
+
+Run: `bb repl`
+Expected: `Starting nREPL on port 1667...` then connects. In another terminal:
 
 ```bash
-export ANTHROPIC_API_KEY=your-key-here
-bb run
+bb --nrepl-port 1667
 ```
 
-Type a simple goal: `Print hello world`
-Expected: agent plans a single task, generates/reuses a tool, executes it, prints result.
+Then at the prompt:
+```clojure
+(require '[botashka.core :as b])
+(b/status)
+```
+Expected: prints empty tool library and empty plan.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/botashka/core.clj bb.edn
-git commit -m "feat: wire up core — channel bus, main loop, run-tool helper"
+git commit -m "feat: REPL-first core API — plan!/run-all!/run-step!/status"
 ```
 
 ---
 
-## Task 9: Seed tool library with two bootstrap tools
+## Task 8: Seed tool library with two bootstrap tools
 
 **Files:**
 - Create: `tools/fetch-url.clj`
@@ -982,18 +931,18 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 | clojure.spec validation | Task 4 |
 | Planning layer (goal → bb.edn tasks) | Task 5 |
 | ReAct loop (THINK/GENERATE/EXECUTE/OBSERVE) | Task 6 |
-| Channel bus + TUI adapter | Task 7 |
-| Core wiring + run-tool helper | Task 8 |
-| Seed tool library | Task 9 |
-| Streaming protocol (:token/:done/:info/:ask) | Task 7 + Task 8 |
-| JVM escape hatch (clojure -M) | Noted in Task 6 execute-tool — `bb -` handles SCI; full JVM subprocess can be added as a follow-on |
+| REPL-first interaction + core API | Task 7 |
+| Seed tool library | Task 8 |
+| Streaming protocol (tokens printed direct to stdout) | Task 2 + Task 7 |
+| JVM escape hatch | Task 6 `execute-tool` uses `bb -`; full `clojure -M` subprocess is a follow-on |
+| TUI adapter (channel bus, :token/:done/:info/:ask) | **Deferred — out of scope for v1** |
 
 **Placeholder scan:** No TBDs, TODOs, or "similar to" references found.
 
 **Type consistency check:**
-- `tools-dir` — string path, consistent across tools.clj, react.clj, core.clj ✓
-- `api-key` — string, passed through llm/complete consistently ✓  
-- `out-ch` — core.async channel, `:human-out` message protocol used in tui.clj, react.clj, core.clj ✓
-- `parse-think-decision` — defined in Task 6, used only in Task 6 ✓
+- `tools-dir` — string `"tools"`, consistent across tools.clj, react.clj, core.clj ✓
+- `api-key` — string from env, passed via `(api-key)` helper in core.clj ✓
+- `parse-think-decision` — defined and used only in react.clj ✓
 - `execute-tool` — defined and tested in Task 6 ✓
-- `run-tool` — defined in core.clj (Task 8), referenced in bb.edn `:init` ✓
+- `run-tool` — defined in core.clj (Task 7), referenced in bb.edn `:init` ✓
+- `react-step!` — called from `run-step!`, `run-all!`, and `run-tool` in core.clj with consistent `{:task-doc … :history … :tools-dir … :api-key … :out-ch nil}` map ✓

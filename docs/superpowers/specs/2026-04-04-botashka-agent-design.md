@@ -218,6 +218,7 @@ botashka/
 
 ## Out of Scope (V1)
 
+- TUI adapter (stdin/stdout channel loop) — deferred; v1 uses Babashka nREPL (`bb nrepl-server`) as the interaction model
 - Telegram / WeChat adapters
 - Subagent parallelism via channels
 - Tool versioning / rollback
