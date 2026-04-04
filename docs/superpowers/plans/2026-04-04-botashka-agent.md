@@ -4,7 +4,7 @@
 
 **Goal:** Build a local Babashka-native agentic assistant that uses generated Clojure snippets as its action space, with a self-growing tool library, hybrid plan+ReAct loop, and a REPL-first interface.
 
-**Architecture:** The agent core has three layers — Planner (writes bb.edn tasks), ReAct loop (THINK→GENERATE→EXECUTE→OBSERVE), and Spec Validator (gates all generated code). V1 uses the Babashka nREPL (`bb nrepl-server`) as the interaction model — zero TUI code needed. The channel bus is used internally for LLM streaming; a full TUI adapter is out of scope for v1.
+**Architecture:** The agent core has three layers — Planner (writes bb.edn tasks), ReAct loop (THINK→GENERATE→EXECUTE→OBSERVE), and Spec Validator (gates all generated code). V1 interaction is a `start!` function that runs a `read-line` loop inside `bb repl` — Botashka shows its own prompt and prints structured agent events inline. All output goes through a single `emit!` function so channels + TUI can replace it later with no other changes.
 
 **Tech Stack:** Babashka (bb), clojure.spec.alpha, core.async (SCI subset + future for blocking I/O), babashka.http-client, babashka.tasks, Anthropic Claude API (SSE streaming), cheshire (JSON)
 
@@ -15,20 +15,20 @@
 | File | Responsibility |
 |---|---|
 | `bb.edn` | Project config + live agent task plan (agent writes `:tasks` here) |
-| `src/botashka/core.clj` | REPL-friendly API — `plan!`, `run-all!`, `run-tool`, `status` functions |
-| `src/botashka/llm.clj` | Claude API client — chat completion + SSE streaming via `future` |
+| `src/botashka/core.clj` | `start!` REPL loop + `emit!` output abstraction + `run-tool` helper |
+| `src/botashka/llm.clj` | Claude API client — non-streaming `complete` for v1; `stream-chat` stubbed for v2 |
 | `src/botashka/planner.clj` | Decomposes goal → writes `:tasks` into bb.edn via LLM |
 | `src/botashka/tools.clj` | Tool library management — load, save, list, update index |
 | `src/botashka/spec.clj` | Spec validation helpers — conform generated source, report errors |
 | `src/botashka/react.clj` | ReAct loop — THINK / GENERATE / EXECUTE / OBSERVE per task step |
 | `tools/tool-index.edn` | Tool registry — `{:tool-name {:description … :spec-in … :spec-out …}}` |
-| `test/botashka/llm_test.clj` | Tests for LLM client (mock HTTP) |
+| `test/botashka/llm_test.clj` | Tests for LLM client |
 | `test/botashka/tools_test.clj` | Tests for tool lib CRUD and index management |
 | `test/botashka/spec_test.clj` | Tests for spec validation helpers |
 | `test/botashka/planner_test.clj` | Tests for bb.edn task writing |
 | `test/botashka/react_test.clj` | Tests for ReAct loop decision routing |
 
-**Out of scope for v1:** `src/botashka/tui.clj` — deferred; REPL is the v1 interface.
+**Out of scope for v1:** `src/botashka/tui.clj` — deferred. `emit!` is the seam: v2 replaces its `println` body with `async/>!!` onto `:human-out` channel.
 
 ---
 
@@ -698,24 +698,79 @@ git commit -m "feat: ReAct loop — THINK/GENERATE/EXECUTE/OBSERVE with spec gat
 
 ---
 
-## Task 7: REPL-friendly core API
+## Task 7: REPL loop — start!, emit!, core wiring
 
 **Files:**
 - Modify: `src/botashka/core.clj`
 - Modify: `bb.edn`
 
-V1 interaction is the Babashka nREPL. `core.clj` exposes clean, REPL-callable functions. LLM streaming prints tokens directly to stdout via `future` — no channel bus needed at this layer. The user workflow is:
+`start!` runs a `read-line` loop inside `bb repl`. All agent output goes through `emit!` — a single function that formats and prints events. This is the **channel seam**: in v2, `emit!` is replaced by `async/>!!` onto `:human-out` with no other changes. The interaction looks like:
 
-```clojure
-(require '[botashka.core :as b])
-(b/plan! "Fetch SAP notes from this URL and save as CSV")
-;; inspect bb.edn, then:
-(b/run-all!)
-;; or run a single step:
-(b/run-step! 'fetch-notes)
+```
+user=> (require '[botashka.core :as b]) (b/start!)
+
+🤖 botashka> fetch the title of https://example.com
+
+[thinking] Deciding how to proceed...
+[reuse] fetch-url
+[execute] fetch-url → done
+[generate] parse-title
+[validate] spec/conform → ok, saved tools/parse-title.clj
+[execute] parse-title → done
+
+Example Domain
+
+🤖 botashka> exit
+Goodbye.
+user=>
 ```
 
-- [ ] **Step 1: Implement core.clj**
+V1: no streaming — `complete` returns the full LLM response at once. The `[thinking]` line is printed before the LLM call; the answer after.
+
+- [ ] **Step 1: Write failing test for emit!**
+
+Create `test/botashka/core_test.clj`:
+
+```clojure
+(ns botashka.core-test
+  (:require [clojure.test :refer [deftest is]]
+            [botashka.core :refer [format-event]]))
+
+(deftest format-event-think
+  (is (= "[thinking] deciding next step"
+         (format-event {:type :think :text "deciding next step"}))))
+
+(deftest format-event-reuse
+  (is (= "[reuse] fetch-url"
+         (format-event {:type :reuse :text "fetch-url"}))))
+
+(deftest format-event-generate
+  (is (= "[generate] parse-title → saved tools/parse-title.clj"
+         (format-event {:type :generate :text "parse-title"}))))
+
+(deftest format-event-validate-ok
+  (is (= "[validate] ok"
+         (format-event {:type :validate :status :ok}))))
+
+(deftest format-event-validate-fail
+  (is (= "[validate] attempt 1 failed: missing spec"
+         (format-event {:type :validate :status :fail :attempt 1 :message "missing spec"}))))
+
+(deftest format-event-execute
+  (is (= "[execute] fetch-url → done"
+         (format-event {:type :execute :text "fetch-url"}))))
+
+(deftest format-event-error
+  (is (= "[error] something went wrong"
+         (format-event {:type :error :text "something went wrong"}))))
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bb test test/botashka/core_test.clj`
+Expected: FAIL — `botashka.core/format-event` not found
+
+- [ ] **Step 3: Implement core.clj**
 
 Replace `src/botashka/core.clj` with:
 
@@ -729,112 +784,164 @@ Replace `src/botashka/core.clj` with:
 
 (def tools-dir "tools")
 (def bb-edn-path "bb.edn")
+(def prompt "\n🤖 botashka> ")
 
 (defn- api-key []
   (or (System/getenv "ANTHROPIC_API_KEY")
-      (throw (ex-info "ANTHROPIC_API_KEY environment variable not set" {}))))
+      (throw (ex-info "ANTHROPIC_API_KEY not set" {}))))
 
-(defn plan!
-  "Decompose goal into steps and write them into bb.edn.
-  Returns the tasks map so the user can inspect before running.
-  Example: (plan! \"Fetch SAP notes and save as CSV\")"
-  [goal]
-  (let [tasks (planner/plan! goal (api-key) bb-edn-path)]
-    (println "Plan written to bb.edn with" (count tasks) "steps:")
-    (doseq [[k v] tasks]
-      (println " " k "-" (:doc v)))
-    tasks))
+;; ---------------------------------------------------------------------------
+;; emit! — the channel seam.
+;; V1: formats and prints directly.
+;; V2: replace body with (async/>!! human-out-ch event) — nothing else changes.
+;; ---------------------------------------------------------------------------
 
-(defn run-step!
-  "Run a single named task step through the ReAct loop.
-  Example: (run-step! 'fetch-notes)"
-  [task-name]
-  (let [bb-edn  (edn/read-string (slurp bb-edn-path))
-        task    (get-in bb-edn [:tasks task-name])
-        doc     (:doc task (name task-name))]
-    (react/react-step! {:task-doc  doc
-                        :history   []
-                        :tools-dir tools-dir
-                        :api-key   (api-key)
-                        :out-ch    nil})))
+(defn format-event
+  "Format an agent event map as a human-readable string.
+  Event types: :think :reuse :generate :validate :execute :answer :error :ask"
+  [{:keys [type text status attempt message] :as event}]
+  (case type
+    :think    (str "[thinking] " text)
+    :reuse    (str "[reuse] " text)
+    :generate (str "[generate] " text " → saved tools/" text ".clj")
+    :validate (if (= :ok status)
+                "[validate] ok"
+                (str "[validate] attempt " attempt " failed: " message))
+    :execute  (str "[execute] " text " → done")
+    :answer   text
+    :error    (str "[error] " text)
+    :ask      (str "[?] " text)
+    (str "[" (name type) "] " text)))
 
-(defn run-all!
-  "Execute all tasks in bb.edn in dependency order via babashka.tasks/run.
-  Example: (run-all!)"
-  []
-  (let [bb-edn (edn/read-string (slurp bb-edn-path))
-        tasks  (keys (:tasks bb-edn))]
-    (println "Executing" (count tasks) "tasks...")
-    (doseq [task-name tasks]
-      (println "\n→" task-name)
-      (bt/run task-name))))
+(defn emit!
+  "Emit an agent event to the user. Single point of output — replace for TUI/channel v2."
+  [event]
+  (println (format-event event))
+  (flush))
+
+;; ---------------------------------------------------------------------------
+;; run-tool — called from bb.edn :task bodies via :init require
+;; ---------------------------------------------------------------------------
 
 (defn run-tool
-  "Helper called from within bb.edn task bodies — triggers ReAct loop.
-  Streams token output directly to stdout.
+  "Trigger the ReAct loop for a tool. Called from bb.edn task bodies.
   Example in bb.edn: (run-tool 'fetch-url {:url \"http://example.com\"})"
-  [tool-name args]
+  [tool-name _args]
   (let [result (react/react-step! {:task-doc  (name tool-name)
                                    :history   []
                                    :tools-dir tools-dir
                                    :api-key   (api-key)
-                                   :out-ch    nil})]
+                                   :emit!     emit!})]
     (when-let [output (:result result)]
-      (print output)
-      (flush))
+      (emit! {:type :answer :text output}))
     result))
 
-(defn status
-  "Show current tool library and pending bb.edn tasks.
-  Example: (status)"
+;; ---------------------------------------------------------------------------
+;; start! — REPL interaction loop
+;; ---------------------------------------------------------------------------
+
+(defn- run-goal! [goal]
+  (emit! {:type :think :text "Planning..."})
+  (let [tasks (planner/plan! goal (api-key) bb-edn-path)]
+    (if-not tasks
+      (emit! {:type :error :text "Could not parse plan from LLM response."})
+      (do
+        (emit! {:type :answer :text (str "Plan: " (count tasks) " steps → " (clojure.string/join ", " (map name (keys tasks))))})
+        (doseq [[task-name task] tasks]
+          (emit! {:type :think :text (str "Step: " (name task-name) " — " (:doc task))})
+          (let [result (react/react-step! {:task-doc  (:doc task (name task-name))
+                                           :history   []
+                                           :tools-dir tools-dir
+                                           :api-key   (api-key)
+                                           :emit!     emit!})]
+            (when-let [output (:result result)]
+              (emit! {:type :answer :text output}))))))))
+
+(defn start!
+  "Start Botashka's conversational REPL loop. Type goals in natural language.
+  Type 'exit' or 'quit' to return to the Clojure REPL.
+  Example: (botashka.core/start!)"
   []
-  (println "=== Tool Library ===")
-  (doseq [t (tools/list-tools tools-dir)]
-    (let [meta (get (tools/load-index tools-dir) t)]
-      (println " " t "-" (:description meta))))
-  (println "\n=== Current Plan (bb.edn tasks) ===")
-  (let [bb-edn (edn/read-string (slurp bb-edn-path))]
-    (doseq [[k v] (:tasks bb-edn)]
-      (println " " k "-" (:doc v)))))
+  (println "Botashka ready. Type your goal, or 'exit' to quit.")
+  (loop []
+    (print prompt)
+    (flush)
+    (let [input (read-line)]
+      (when-not (or (nil? input) (#{"exit" "quit"} (clojure.string/trim input)))
+        (try
+          (run-goal! (clojure.string/trim input))
+          (catch Exception e
+            (emit! {:type :error :text (ex-message e)})))
+        (recur))))
+  (println "Goodbye."))
 ```
 
-- [ ] **Step 2: Update bb.edn**
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bb test test/botashka/core_test.clj`
+Expected: PASS
+
+- [ ] **Step 5: Update bb.edn**
 
 ```clojure
 {:paths ["src" "test"]
  :deps  {org.clojure/core.async {:mvn/version "1.6.681"}
          cheshire/cheshire      {:mvn/version "5.12.0"}}
  :init  (require '[botashka.core :refer [run-tool]])
- :tasks {repl  {:doc  "Start Babashka nREPL server for interactive use"
-                :task (do (println "Starting nREPL on port 1667...")
-                          (babashka.nrepl.server/start-server! {:host "localhost" :port 1667})
-                          (println "Connect with: bb --nrepl-port 1667 or your editor's nREPL client")
-                          @(promise))}
-         test  {:doc  "Run all tests"
-                :task (babashka.test/test-runner ["test"])}}}
+ :tasks {test {:doc  "Run all tests"
+               :task (require '[babashka.test :as t])
+                     (t/test-runner {:test-paths ["test"]})}}}
 ```
 
-- [ ] **Step 3: Verify REPL starts**
-
-Run: `bb repl`
-Expected: `Starting nREPL on port 1667...` then connects. In another terminal:
+- [ ] **Step 6: Smoke test the REPL loop**
 
 ```bash
-bb --nrepl-port 1667
+export ANTHROPIC_API_KEY=your-key-here
+bb repl
 ```
 
-Then at the prompt:
+At the Babashka REPL prompt:
 ```clojure
 (require '[botashka.core :as b])
-(b/status)
+(b/start!)
 ```
-Expected: prints empty tool library and empty plan.
 
-- [ ] **Step 4: Commit**
+Type: `what is 2 + 2`
+Expected: `[thinking]` line, then agent generates/reuses a tool, prints `4`, returns to `🤖 botashka> ` prompt.
+
+Type: `exit`
+Expected: `Goodbye.` and return to `user=>` prompt.
+
+- [ ] **Step 7: Also update react-step! to accept :emit! instead of :out-ch**
+
+In `src/botashka/react.clj`, replace all `(when out-ch (async/>!! out-ch …))` calls with `(when emit! (emit! …))`. Update the function signature's destructuring: replace `:out-ch` with `:emit!`.
+
+This is the key wiring that makes `emit!` the single output seam for the entire agent — react loop events flow through it too.
+
+Updated react.clj destructuring and emit calls:
+
+```clojure
+(defn react-step!
+  [{:keys [task-doc history tools-dir api-key emit! max-retries]
+    :or   {max-retries 3}}]
+  ;; ... replace every:
+  ;;   (when out-ch (async/>!! out-ch {:type :info :text ...}))
+  ;; with:
+  ;;   (when emit! (emit! {:type :think/:reuse/:generate/:validate/:execute :text ...}))
+  )
+```
+
+Specific replacements in `react-step!`:
+- `{:type :info :text (str "[THINK] " think-resp)}` → `{:type :think :text "Deciding how to proceed..."}`
+- `{:type :info :text (str "[EXECUTE] " ...)}` → `{:type :execute :text (name (:tool-name decision))}`
+- `{:type :info :text (str "[GENERATE] saved " ...)}` → `{:type :generate :text (name (:tool-name decision))}`
+- `{:type :info :text (str "[VALIDATE] attempt " ...)}` → `{:type :validate :status :fail :attempt attempt :message (:message validation)}`
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/botashka/core.clj bb.edn
-git commit -m "feat: REPL-first core API — plan!/run-all!/run-step!/status"
+git add src/botashka/core.clj src/botashka/react.clj bb.edn test/botashka/core_test.clj
+git commit -m "feat: REPL loop — start!/emit! output seam, run-tool, react wiring"
 ```
 
 ---
@@ -926,23 +1033,23 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 | Spec section | Covered by task |
 |---|---|
 | Babashka runtime + bb.edn scaffold | Task 1 |
-| LLM client + SSE streaming | Task 2 |
+| LLM client (non-streaming v1) | Task 2 |
 | Tool library CRUD + index | Task 3 |
 | clojure.spec validation | Task 4 |
 | Planning layer (goal → bb.edn tasks) | Task 5 |
 | ReAct loop (THINK/GENERATE/EXECUTE/OBSERVE) | Task 6 |
-| REPL-first interaction + core API | Task 7 |
+| REPL loop + emit! output seam + core wiring | Task 7 |
 | Seed tool library | Task 8 |
-| Streaming protocol (tokens printed direct to stdout) | Task 2 + Task 7 |
-| JVM escape hatch | Task 6 `execute-tool` uses `bb -`; full `clojure -M` subprocess is a follow-on |
-| TUI adapter (channel bus, :token/:done/:info/:ask) | **Deferred — out of scope for v1** |
+| Channel seam for v2 TUI | `emit!` in core.clj + `:emit!` key in react-step! — documented in Task 7 |
+| Streaming (v2) | Deferred — `llm/complete` used for now; `stream-chat` stub in place |
+| TUI adapter | Deferred — `emit!` is the seam |
 
-**Placeholder scan:** No TBDs, TODOs, or "similar to" references found.
+**Placeholder scan:** No TBDs or TODOs found.
 
 **Type consistency check:**
 - `tools-dir` — string `"tools"`, consistent across tools.clj, react.clj, core.clj ✓
-- `api-key` — string from env, passed via `(api-key)` helper in core.clj ✓
-- `parse-think-decision` — defined and used only in react.clj ✓
-- `execute-tool` — defined and tested in Task 6 ✓
-- `run-tool` — defined in core.clj (Task 7), referenced in bb.edn `:init` ✓
-- `react-step!` — called from `run-step!`, `run-all!`, and `run-tool` in core.clj with consistent `{:task-doc … :history … :tools-dir … :api-key … :out-ch nil}` map ✓
+- `api-key` — string from `(api-key)` helper in core.clj ✓
+- `emit!` — function `(fn [event] …)`, passed as `:emit!` key in react-step! opts map; nil-safe with `(when emit! …)` ✓
+- `format-event` — defined and tested in core.clj, used only by `emit!` ✓
+- `react-step!` opts — `{:task-doc :history :tools-dir :api-key :emit! :max-retries}` — consistent between Task 6 impl and Task 7 callers ✓
+- `run-tool` — defined in core.clj, referenced in bb.edn `:init` ✓
