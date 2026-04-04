@@ -134,11 +134,38 @@ Four core.async channels form the communication bus:
 | Channel | Direction | Purpose |
 |---|---|---|
 | `:human-in` | stdin → agent | user input, commands, confirmations |
-| `:human-out` | agent → stdout/TUI | progress, results, questions |
-| `:llm-req` / `:llm-resp` | agent ↔ Claude API | queued, rate-limit aware |
+| `:human-out` | agent → stdout/TUI | progress, results, questions (including token stream) |
+| `:llm-req` / `:llm-resp` | agent ↔ Claude API | queued, rate-limit aware, streaming |
 | `:tool-exec` | ReAct loop → executor | fire tool, receive result |
 
 V1 ships TUI only (stdin/stdout). Telegram/WeChat adapters slot in later by putting/taking on `:human-in`/`:human-out` — zero agent core changes required.
+
+### Streaming Protocol
+
+Claude API responses stream as SSE (server-sent events). Botashka handles this with `future` (a real JVM thread, available in Babashka) reading the chunked HTTP response and putting token messages onto `:human-out`:
+
+```clojure
+;; botashka/llm.clj — streaming LLM response onto channel
+(future
+  (let [resp (http/post api-url {:body payload :as :stream})]
+    (doseq [chunk (line-seq (io/reader (:body resp)))]
+      (when-let [token (parse-sse-token chunk)]
+        (async/>!! human-out-ch {:type :token :text token})))
+    (async/>!! human-out-ch {:type :done})))
+```
+
+`future` is used instead of a `go` block because reading from a Java `InputStream` is blocking I/O — a `go` block would starve the core.async thread pool. `future` gives a dedicated JVM thread safe for blocking ops.
+
+The `:human-out` channel carries a simple message protocol:
+
+| Message | Meaning |
+|---|---|
+| `{:type :token :text "..."}` | Next streamed token — print without newline |
+| `{:type :done}` | Response complete — print newline, re-show prompt |
+| `{:type :info :text "..."}` | Non-streamed status message (tool execution, plan step, etc.) |
+| `{:type :ask :text "..."}` | Agent needs human input — TUI prompts and puts reply on `:human-in` |
+
+The TUI adapter (`botashka/tui.clj`) runs a go-loop reading from `:human-out` and handles each message type — printing tokens inline for streaming, full lines for info/ask messages. Future UI adapters (Telegram, WeChat) implement the same protocol against the same channels.
 
 ---
 
