@@ -275,17 +275,15 @@ For token streaming in v2, bind `*out*` in the `future` to the nREPL session's o
 | Version | Interface | How |
 |---|---|---|
 | V1 | `bb repl` — `start!` read-line loop | Zero extra code — `emit!` prints to stdout |
-| V2 | `bb nrepl-server` — any nREPL client | Swap `emit!` body; token streaming via `binding [*out*]` |
-| V3 | Custom TUI | Thin nREPL client that renders `:out` messages |
-| V4 | Telegram / WeChat | Adapter that bridges nREPL `:out` to bot API |
+| V2 | `bb nrepl-server` — any nREPL client | Swap `emit!` body; CIDER/Calva/vim-iced work immediately |
+| V3 | Custom TUI / Telegram / WeChat | Thin nREPL client that renders `:out` messages |
 
 ---
 
 ## Out of Scope (V1)
 
 - nREPL server mode — deferred to v2; v1 uses `bb repl` directly
-- TUI adapter — deferred to v3; nREPL client is the preferred v2 path
-- Telegram / WeChat adapters
+- Custom TUI / Telegram / WeChat — deferred to v3; implemented as thin nREPL clients
 - Subagent parallelism via channels
 - Tool versioning / rollback
 - Embedding-based tool search
