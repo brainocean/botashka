@@ -15,14 +15,16 @@
 | File | Responsibility |
 |---|---|
 | `bb.edn` | Project config + live agent task plan (agent writes `:tasks` here) |
-| `src/botashka/core.clj` | `start!` REPL loop + `emit!` output abstraction + `run-tool` helper |
+| `src/botashka/core.clj` | `start!` REPL loop + `emit!` output abstraction + `run-tool` helper + `session-trace` atom |
 | `src/botashka/llm.clj` | Claude API client — non-streaming `complete` for v1; `stream-chat` stubbed for v2 |
+| `src/botashka/llm_context.clj` | Context assembly — `llm-context` pure fn; selects trace slice per LLM call |
 | `src/botashka/planner.clj` | Decomposes goal → writes `:tasks` into bb.edn via LLM |
 | `src/botashka/tools.clj` | Tool library management — load, save, list, update index |
 | `src/botashka/spec.clj` | Spec validation helpers — conform generated source, report errors |
-| `src/botashka/react.clj` | ReAct loop — THINK / GENERATE / EXECUTE / OBSERVE per task step |
+| `src/botashka/react.clj` | ReAct loop — THINK / GENERATE / EXECUTE / OBSERVE per task step; receives `session-trace` |
 | `tools/tool-index.edn` | Tool registry — `{:tool-name {:description … :spec-in … :spec-out …}}` |
 | `test/botashka/llm_test.clj` | Tests for LLM client |
+| `test/botashka/llm_context_test.clj` | Tests for context assembly (select/truncate/render pipelines) |
 | `test/botashka/tools_test.clj` | Tests for tool lib CRUD and index management |
 | `test/botashka/spec_test.clj` | Tests for spec validation helpers |
 | `test/botashka/planner_test.clj` | Tests for bb.edn task writing |
@@ -193,7 +195,146 @@ git commit -m "feat: LLM client with SSE streaming and parse-sse-token"
 
 ---
 
-## Task 3: Tool library management
+## Task 3: LLM context assembly — llm_context.clj
+
+**Files:**
+- Create: `src/botashka/llm_context.clj`
+- Create: `test/botashka/llm_context_test.clj`
+
+`llm-context` is a pure function: given `session-trace` (the append-only event vector) and an `event-type` keyword identifying the upcoming LLM call, it selects the relevant trace slice and renders it as a token string. No mutable state. No side effects. Each event type has its own selection rule.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `test/botashka/llm_context_test.clj`:
+
+```clojure
+(ns botashka.llm-context-test
+  (:require [clojure.test :refer [deftest is]]
+            [botashka.llm-context :refer [llm-context select-events render-trace]]))
+
+(def sample-trace
+  [{:type :user-input  :text "fetch the title of https://example.com"}
+   {:type :plan        :tasks [{:name "fetch" :doc "Fetch HTML"} {:name "parse" :doc "Extract title"}]}
+   {:type :think       :text "Deciding..." :task "fetch"}
+   {:type :execute     :tool :fetch-url :args {:url "https://example.com"} :task "fetch"}
+   {:type :observe     :tool :fetch-url :result "<html>Example Domain</html>" :task "fetch"}])
+
+(deftest select-think-events
+  ;; :think LLM call needs: user-input, plan, and last observe
+  (let [selected (select-events sample-trace :think)]
+    (is (some #(= :user-input (:type %)) selected))
+    (is (some #(= :plan (:type %)) selected))
+    (is (some #(= :observe (:type %)) selected))))
+
+(deftest select-generate-events
+  ;; :generate LLM call needs only the think decision
+  (let [trace (conj sample-trace {:type :think :text "{:decision :generate :tool-name :parse-title}" :task "parse"})
+        selected (select-events trace :generate)]
+    (is (= 1 (count selected)))
+    (is (= :think (:type (first selected))))))
+
+(deftest select-plan-events
+  ;; :plan LLM call needs only user-input
+  (let [selected (select-events sample-trace :plan)]
+    (is (= 1 (count selected)))
+    (is (= :user-input (:type (first selected))))))
+
+(deftest render-produces-string
+  (let [selected (select-events sample-trace :think)
+        result   (render-trace selected)]
+    (is (string? result))
+    (is (seq result))))
+
+(deftest llm-context-returns-string
+  (let [ctx (llm-context sample-trace :think)]
+    (is (string? ctx))
+    (is (seq ctx))))
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bb test test/botashka/llm_context_test.clj`
+Expected: FAIL — `botashka.llm-context` not found
+
+- [ ] **Step 3: Implement llm_context.clj**
+
+Create `src/botashka/llm_context.clj`:
+
+```clojure
+(ns botashka.llm-context)
+
+(defmulti select-events
+  "Select the relevant subset of session-trace for a given LLM call type.
+  Dispatches on event-type keyword."
+  (fn [_trace event-type] event-type))
+
+(defmethod select-events :plan [trace _]
+  ;; Planning only needs the user's goal
+  (filterv #(= :user-input (:type %)) trace))
+
+(defmethod select-events :think [trace _]
+  ;; Thinking needs: user goal, plan, and last observation
+  (let [keep? #{:user-input :plan}
+        base  (filterv #(keep? (:type %)) trace)
+        last-obs (last (filterv #(= :observe (:type %)) trace))]
+    (cond-> base last-obs (conj last-obs))))
+
+(defmethod select-events :generate [trace _]
+  ;; Code generation needs only the last think decision
+  [(last (filterv #(= :think (:type %)) trace))])
+
+(defmethod select-events :default [trace _]
+  trace)
+
+(defmulti render-event
+  "Render a single trace event as a human-readable string for LLM consumption."
+  :type)
+
+(defmethod render-event :user-input [{:keys [text]}]
+  (str "User goal: " text))
+
+(defmethod render-event :plan [{:keys [tasks]}]
+  (str "Plan: " (clojure.string/join ", " (map :name tasks))))
+
+(defmethod render-event :think [{:keys [text task]}]
+  (str (when task (str "[" task "] ")) "Think: " text))
+
+(defmethod render-event :observe [{:keys [tool result task]}]
+  (str (when task (str "[" task "] ")) "Observation from " (name tool) ": " result))
+
+(defmethod render-event :default [event]
+  (str (name (:type event)) ": " (pr-str (dissoc event :type))))
+
+(defn render-trace
+  "Render a sequence of selected trace events as a single token string."
+  [events]
+  (clojure.string/join "\n" (map render-event (remove nil? events))))
+
+(defn llm-context
+  "Pure fn: given session-trace and the event-type of the upcoming LLM call,
+  return a token string containing the relevant context.
+  Usage: (llm-context session-trace :think)"
+  [session-trace event-type]
+  (-> session-trace
+      (select-events event-type)
+      render-trace))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bb test test/botashka/llm_context_test.clj`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/botashka/llm_context.clj test/botashka/llm_context_test.clj
+git commit -m "feat: llm-context — pure context assembly from session-trace"
+```
+
+---
+
+## Task 4: Tool library management
 
 **Files:**
 - Create: `src/botashka/tools.clj`
@@ -306,7 +447,7 @@ git commit -m "feat: tool library management — load/save/list/index"
 
 ---
 
-## Task 4: Spec validation helpers
+## Task 5: Spec validation helpers
 
 **Files:**
 - Create: `src/botashka/spec.clj`
@@ -408,7 +549,7 @@ git commit -m "feat: spec validation — isolated SCI eval of generated tool sou
 
 ---
 
-## Task 5: Planner — goal decomposition into bb.edn tasks
+## Task 6: Planner — goal decomposition into bb.edn tasks
 
 **Files:**
 - Create: `src/botashka/planner.clj`
@@ -520,7 +661,7 @@ git commit -m "feat: planner — LLM goal decomposition into bb.edn tasks"
 
 ---
 
-## Task 6: ReAct loop
+## Task 7: ReAct loop
 
 **Files:**
 - Create: `src/botashka/react.clj`
@@ -628,9 +769,10 @@ To ask the human for clarification:
 
 (defn react-step!
   "Run one ReAct iteration for a task step.
+  session-trace is the append-only event vector — used for llm-context assembly.
   emit! is a function (fn [event-map] ...) for output — nil-safe, pass nil to suppress output.
   Returns {:status :ok/:error :result <string> :observation <string>}"
-  [{:keys [task-doc history tools-dir api-key emit! max-retries]
+  [{:keys [task-doc session-trace tools-dir api-key emit! max-retries]
     :or   {max-retries 3}}]
   (let [tool-index (tools/index-for-llm tools-dir)
         think-resp (llm/complete
@@ -695,7 +837,7 @@ git commit -m "feat: ReAct loop — THINK/GENERATE/EXECUTE/OBSERVE with spec gat
 
 ---
 
-## Task 7: REPL loop — start!, emit!, core wiring
+## Task 8: REPL loop — start!, emit!, core wiring
 
 **Files:**
 - Modify: `src/botashka/core.clj`
@@ -783,6 +925,13 @@ Replace `src/botashka/core.clj` with:
 (def bb-edn-path "bb.edn")
 (def prompt "\n🤖 botashka> ")
 
+;; session-trace — append-only event vector for the current session
+(def session-trace (atom []))
+
+(defn- append-event! [event]
+  (swap! session-trace conj event)
+  event)
+
 (defn- api-key []
   (or (System/getenv "ANTHROPIC_API_KEY")
       (throw (ex-info "ANTHROPIC_API_KEY not set" {}))))
@@ -824,11 +973,11 @@ Replace `src/botashka/core.clj` with:
   "Trigger the ReAct loop for a tool. Called from bb.edn task bodies.
   Example in bb.edn: (run-tool 'fetch-url {:url \"http://example.com\"})"
   [tool-name _args]
-  (let [result (react/react-step! {:task-doc  (name tool-name)
-                                   :history   []
-                                   :tools-dir tools-dir
-                                   :api-key   (api-key)
-                                   :emit!     emit!})]
+  (let [result (react/react-step! {:task-doc      (name tool-name)
+                                   :session-trace @session-trace
+                                   :tools-dir     tools-dir
+                                   :api-key       (api-key)
+                                   :emit!         emit!})]
     (when-let [output (:result result)]
       (emit! {:type :answer :text output}))
     result))
@@ -838,19 +987,23 @@ Replace `src/botashka/core.clj` with:
 ;; ---------------------------------------------------------------------------
 
 (defn- run-goal! [goal]
+  (append-event! {:type :user-input :text goal})
   (emit! {:type :think :text "Planning..."})
   (let [tasks (planner/plan! goal (api-key) bb-edn-path)]
     (if-not tasks
       (emit! {:type :error :text "Could not parse plan from LLM response."})
       (do
+        (append-event! {:type :plan :tasks (mapv (fn [[k v]] {:name (name k) :doc (:doc v)}) tasks)})
         (emit! {:type :answer :text (str "Plan: " (count tasks) " steps → " (clojure.string/join ", " (map name (keys tasks))))})
         (doseq [[task-name task] tasks]
           (emit! {:type :think :text (str "Step: " (name task-name) " — " (:doc task))})
-          (let [result (react/react-step! {:task-doc  (:doc task (name task-name))
-                                           :history   []
-                                           :tools-dir tools-dir
-                                           :api-key   (api-key)
-                                           :emit!     emit!})]
+          (let [result (react/react-step! {:task-doc      (:doc task (name task-name))
+                                           :session-trace @session-trace
+                                           :tools-dir     tools-dir
+                                           :api-key       (api-key)
+                                           :emit!         (fn [event]
+                                                            (append-event! event)
+                                                            (emit! event))})]
             (when-let [output (:result result)]
               (emit! {:type :answer :text output}))))))))
 
@@ -918,7 +1071,7 @@ git commit -m "feat: REPL loop — start!/emit! output seam, run-tool"
 
 ---
 
-## Task 8: Seed tool library with two bootstrap tools
+## Task 9: Seed tool library with two bootstrap tools
 
 **Files:**
 - Create: `tools/fetch-url.clj`
@@ -1006,12 +1159,13 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 |---|---|
 | Babashka runtime + bb.edn scaffold | Task 1 |
 | LLM client — non-streaming `complete` for v1 | Task 2 |
-| Tool library CRUD + index | Task 3 |
-| clojure.spec validation | Task 4 |
-| Planning layer (goal → bb.edn tasks via `run-tool`) | Task 5 |
-| ReAct loop — THINK/GENERATE/EXECUTE/OBSERVE with `:emit!` | Task 6 |
-| REPL loop + `emit!` + `format-event` + `start!` | Task 7 |
-| Seed tool library (`fetch-url`, `write-file`) | Task 8 |
+| `llm-context` pure fn — session-trace → token string | Task 3 |
+| Tool library CRUD + index | Task 4 |
+| clojure.spec validation | Task 5 |
+| Planning layer (goal → bb.edn tasks via `run-tool`) | Task 6 |
+| ReAct loop — THINK/GENERATE/EXECUTE/OBSERVE with `:emit!` + `session-trace` | Task 7 |
+| REPL loop + `emit!` + `format-event` + `start!` + `session-trace` atom | Task 8 |
+| Seed tool library (`fetch-url`, `write-file`) | Task 9 |
 | nREPL v2 migration path | Documented in spec; `emit!` is the seam — no plan task needed |
 
 **Placeholder scan:** No TBDs or TODOs found.
@@ -1020,7 +1174,9 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 - `tools-dir` — string `"tools"`, consistent across tools.clj, react.clj, core.clj ✓
 - `api-key` — string from `(api-key)` helper in core.clj ✓
 - `emit!` — `(fn [event-map] …)`, passed as `:emit!` in react-step! opts; nil-safe with `(when emit! …)`; no `:out-ch` anywhere ✓
-- `react-step!` opts — `{:task-doc :history :tools-dir :api-key :emit! :max-retries}` — consistent from Task 6 onward ✓
-- `format-event` — pure fn, tested in Task 7, used only by `emit!` in core.clj ✓
-- `run-tool` — defined in core.clj (Task 7), referenced in bb.edn `:init` ✓
-- Seed tools: `fetch-url` and `write-file` — consistent between Task 8 and spec tool index example ✓
+- `session-trace` — `(atom [])` in core.clj; passed as `@session-trace` (dereffed) to react-step! opts ✓
+- `react-step!` opts — `{:task-doc :session-trace :tools-dir :api-key :emit! :max-retries}` — consistent from Task 7 onward ✓
+- `format-event` — pure fn, tested in Task 8, used only by `emit!` in core.clj ✓
+- `run-tool` — defined in core.clj (Task 8), referenced in bb.edn `:init` ✓
+- `llm-context` — pure fn in llm_context.clj; called from react.clj THINK step with `(llm-context session-trace :think)` ✓
+- Seed tools: `fetch-url` and `write-file` — consistent between Task 9 and spec tool index example ✓

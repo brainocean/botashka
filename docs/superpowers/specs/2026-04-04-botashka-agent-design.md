@@ -164,20 +164,87 @@ All agent output goes through a single `emit!` function in `core.clj`. This is t
 
 ---
 
+## Session Trace
+
+`session-trace` is the core runtime data structure — an append-only sequence of typed event maps representing everything that happened in a session.
+
+```clojure
+;; session-trace: a vector of typed event maps (append-only)
+[{:type :user-input  :text "fetch the title of https://example.com"}
+ {:type :plan        :tasks [{:name "fetch" :doc "Fetch HTML"} {:name "parse" :doc "Extract title"}]}
+ {:type :think       :text "Deciding how to proceed..." :task "fetch"}
+ {:type :reuse       :tool :fetch-url :task "fetch"}
+ {:type :execute     :tool :fetch-url :args {:url "https://example.com"} :task "fetch"}
+ {:type :observe     :tool :fetch-url :result "<html>…</html>" :task "fetch"}
+ {:type :think       :text "Deciding how to proceed..." :task "parse"}
+ {:type :generate    :tool :parse-title :task "parse"}
+ {:type :validate    :tool :parse-title :status :ok :task "parse"}
+ {:type :execute     :tool :parse-title :args {:html "<html>…</html>"} :task "parse"}
+ {:type :observe     :tool :parse-title :result "Example Domain" :task "parse"}
+ {:type :assistant-out :text "Example Domain"}]
+```
+
+Every `emit!` call appends to `session-trace`. The trace is the single source of truth for replay, debugging, and LLM context assembly.
+
+### Event types
+
+| Type | When | Key fields |
+|---|---|---|
+| `:user-input` | User types a goal | `:text` |
+| `:plan` | Planner decomposes goal | `:tasks` |
+| `:think` | LLM decides reuse/generate/compose | `:text`, `:task` |
+| `:reuse` | LLM selects existing tool | `:tool`, `:task` |
+| `:generate` | LLM writes new tool | `:tool`, `:task` |
+| `:validate` | Spec check result | `:tool`, `:status`, `:attempt`, `:message`, `:task` |
+| `:execute` | Tool runs (bb eval subprocess) | `:tool`, `:args`, `:task` |
+| `:observe` | Tool result captured | `:tool`, `:result`, `:task` |
+| `:assistant-out` | Final answer to user | `:text` |
+| `:error` | Any failure | `:text` |
+| `:ask` | Agent needs human clarification | `:text` |
+
+---
+
+## LLM Context Assembly
+
+`llm-context` is a pure function that selects and renders the relevant portion of `session-trace` as a token string for a given LLM call.
+
+```clojure
+;; botashka/llm_context.clj
+(defn llm-context
+  "Given the full session-trace and the event type of the upcoming LLM call,
+  select and render the relevant subset as a token string.
+  Returns a string ready to include in the LLM :messages payload."
+  [session-trace event-type]
+  …)
+```
+
+Each event type routes to its own context pipeline:
+
+| LLM call | Context selected |
+|---|---|
+| `:think` | user-input + plan + tool-index + last `:observe` result |
+| `:generate` | think decision + task-doc only (no history, no tool-index) |
+| `:plan` | user-input only |
+
+The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (token budget) → **render** (format as string). No embedding, no vector search — the LLM reads the plain text index and trace.
+
+---
+
 ## Project Structure
 
 ```
 botashka/
-├── bb.edn                    ← live plan (agent writes here)
+├── bb.edn                        ← live plan (agent writes here)
 ├── src/
-│   ├── botashka/core.clj     ← start! loop, emit!, format-event, run-tool
-│   ├── botashka/planner.clj  ← LLM → bb.edn task writer
-│   ├── botashka/react.clj    ← ReAct loop (think/generate/execute/observe)
-│   ├── botashka/tools.clj    ← tool lib management (load/save/list)
-│   ├── botashka/spec.clj     ← spec validation helpers
-│   └── botashka/llm.clj      ← Claude API client (non-streaming v1)
+│   ├── botashka/core.clj         ← start! loop, emit!, format-event, run-tool, session-trace atom
+│   ├── botashka/planner.clj      ← LLM → bb.edn task writer
+│   ├── botashka/react.clj        ← ReAct loop (think/generate/execute/observe)
+│   ├── botashka/tools.clj        ← tool lib management (load/save/list)
+│   ├── botashka/spec.clj         ← spec validation helpers
+│   ├── botashka/llm.clj          ← Claude API client (non-streaming v1)
+│   └── botashka/llm_context.clj  ← context assembly — llm-context pure fn + filter pipelines
 └── tools/
-    ├── tool-index.edn        ← tool registry (name → description + specs)
+    ├── tool-index.edn            ← tool registry (name → description + specs)
     ├── fetch-url.clj
     ├── write-file.clj
     └── ...
@@ -197,6 +264,8 @@ botashka/
 | Tool selection | LLM reads index | Keeps decision in one place, no embedding overhead |
 | Validation | clojure.spec | Machine-checkable, instruments agent's own tools |
 | Planning | bb.edn tasks + `run-tool` helper | Human-inspectable, editable; `bt/run` executes each step |
+| Runtime data structure | `session-trace` (append-only event vector) | Single source of truth for replay, debug, and context assembly |
+| Context assembly | `llm-context` pure fn in `llm_context.clj` | Selects relevant trace slice per LLM call — no embedding, no vector search |
 | Communication | `emit!` function (v1 println → nREPL `:out` in v2) | Single seam — transport swappable without touching agent core |
 | LLM v1 | Non-streaming `complete` wrapping SSE | Simple for v1; `stream-chat` is the v2 upgrade path |
 | V1 UI | `bb repl` + `start!` loop | Zero TUI code; `emit!` is the seam for future adapters |
