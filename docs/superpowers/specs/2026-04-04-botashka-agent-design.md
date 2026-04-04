@@ -20,7 +20,7 @@ Botashka is a local, general-purpose agentic assistant — a Clojure-native alte
 - Code generation as the primary action mechanism (not JSON tool calls)
 - Self-growing tool library: agent generates, validates, saves, and reuses tools
 - Human-readable, inspectable plan (bb.edn) the user can edit at any time
-- Clean channel abstraction so future UIs (Telegram, WeChat) require zero agent core changes
+- Single `emit!` output seam so future UIs (nREPL clients, Telegram, WeChat) require zero agent core changes
 
 ---
 
@@ -28,7 +28,7 @@ Botashka is a local, general-purpose agentic assistant — a Clojure-native alte
 
 ### Four Zones
 
-1. **Human / TUI** — stdin/stdout terminal interface. Communicates with agent via core.async channels.
+1. **Human / REPL** — V1: `bb repl` with `start!` read-line loop. V2+: nREPL server — any nREPL client (CIDER, Calva, vim-iced) connects and receives output as `:out` messages.
 2. **Agent Core** — three layers: Planner → ReAct Loop → Spec Validator.
 3. **LLM** — Claude claude-sonnet-4-5 via Anthropic API. Used for planning decomposition and ReAct reasoning.
 4. **Tool Library + Executor** — `tools/*.clj` files with `tools/tool-index.edn`, executed in Babashka/SCI. JVM `clojure -M` available as escape hatch when SCI limits are hit.
@@ -137,45 +137,30 @@ The LLM always receives `tool-index.edn` in its context. After generating a new 
 
 ---
 
-## Channel Layer
+## Output Layer — emit!
 
-Four core.async channels form the communication bus:
-
-| Channel | Direction | Purpose |
-|---|---|---|
-| `:human-in` | stdin → agent | user input, commands, confirmations |
-| `:human-out` | agent → stdout/TUI | progress, results, questions (including token stream) |
-| `:llm-req` / `:llm-resp` | agent ↔ Claude API | queued, rate-limit aware, streaming |
-| `:tool-exec` | ReAct loop → executor | fire tool, receive result |
-
-V1 ships TUI only (stdin/stdout). Telegram/WeChat adapters slot in later by putting/taking on `:human-in`/`:human-out` — zero agent core changes required.
-
-### Streaming Protocol
-
-Claude API responses stream as SSE (server-sent events). Botashka handles this with `future` (a real JVM thread, available in Babashka) reading the chunked HTTP response and putting token messages onto `:human-out`:
+All agent output goes through a single `emit!` function in `core.clj`. This is the **UI seam** — the only thing that changes between v1 and v2:
 
 ```clojure
-;; botashka/llm.clj — streaming LLM response onto channel
-(future
-  (let [resp (http/post api-url {:body payload :as :stream})]
-    (doseq [chunk (line-seq (io/reader (:body resp)))]
-      (when-let [token (parse-sse-token chunk)]
-        (async/>!! human-out-ch {:type :token :text token})))
-    (async/>!! human-out-ch {:type :done})))
+;; V1 — prints directly; works as nREPL :out automatically if running under bb nrepl-server
+(defn emit! [event]
+  (println (format-event event)))
 ```
 
-`future` is used instead of a `go` block because reading from a Java `InputStream` is blocking I/O — a `go` block would starve the core.async thread pool. `future` gives a dedicated JVM thread safe for blocking ops.
+`emit!` accepts structured event maps. `format-event` renders them as human-readable lines:
 
-The `:human-out` channel carries a simple message protocol:
-
-| Message | Meaning |
+| Event type | Rendered output |
 |---|---|
-| `{:type :token :text "..."}` | Next streamed token — print without newline |
-| `{:type :done}` | Response complete — print newline, re-show prompt |
-| `{:type :info :text "..."}` | Non-streamed status message (tool execution, plan step, etc.) |
-| `{:type :ask :text "..."}` | Agent needs human input — TUI prompts and puts reply on `:human-in` |
+| `{:type :think :text "…"}` | `[thinking] …` |
+| `{:type :reuse :text "fetch-url"}` | `[reuse] fetch-url` |
+| `{:type :generate :text "parse-title"}` | `[generate] parse-title → saved tools/parse-title.clj` |
+| `{:type :validate :status :ok}` | `[validate] ok` |
+| `{:type :validate :status :fail :attempt 1 :message "…"}` | `[validate] attempt 1 failed: …` |
+| `{:type :execute :text "fetch-url"}` | `[execute] fetch-url → done` |
+| `{:type :answer :text "…"}` | `…` (printed as-is) |
+| `{:type :error :text "…"}` | `[error] …` |
 
-The TUI adapter (`botashka/tui.clj`) runs a go-loop reading from `:human-out` and handles each message type — printing tokens inline for streaming, full lines for info/ask messages. Future UI adapters (Telegram, WeChat) implement the same protocol against the same channels.
+`react-step!` and all agent layers call `emit!` — none are aware of the transport. See **Future UI: nREPL Transport** for the v2 migration path.
 
 ---
 
@@ -185,19 +170,20 @@ The TUI adapter (`botashka/tui.clj`) runs a go-loop reading from `:human-out` an
 botashka/
 ├── bb.edn                    ← live plan (agent writes here)
 ├── src/
-│   ├── botashka/core.clj     ← entry point, channel bus, main loop
+│   ├── botashka/core.clj     ← start! loop, emit!, format-event, run-tool
 │   ├── botashka/planner.clj  ← LLM → bb.edn task writer
-│   ├── botashka/react.clj    ← ReAct loop (think/act/observe)
+│   ├── botashka/react.clj    ← ReAct loop (think/generate/execute/observe)
 │   ├── botashka/tools.clj    ← tool lib management (load/save/list)
 │   ├── botashka/spec.clj     ← spec validation helpers
-│   ├── botashka/llm.clj      ← Claude API client
-│   └── botashka/tui.clj      ← stdin/stdout TUI adapter
+│   └── botashka/llm.clj      ← Claude API client (non-streaming v1)
 └── tools/
     ├── tool-index.edn        ← tool registry (name → description + specs)
     ├── fetch-url.clj
-    ├── write-csv.clj
+    ├── write-file.clj
     └── ...
 ```
+
+`tui.clj` is not present in v1 — `emit!` in `core.clj` is the output layer.
 
 ---
 
@@ -211,7 +197,7 @@ botashka/
 | Tool selection | LLM reads index | Keeps decision in one place, no embedding overhead |
 | Validation | clojure.spec | Machine-checkable, instruments agent's own tools |
 | Planning | bb.edn tasks + `bt/run` | Human-inspectable, editable, dep-ordered |
-| Communication | core.async channels | UI-agnostic, backpressure, composable |
+| Communication | `emit!` function (v1 println; v2 nREPL transport) | Single seam — transport swappable without touching agent core |
 | V1 UI | `bb repl` + `start!` loop | Zero TUI code; `emit!` is the seam for future adapters |
 
 ---
