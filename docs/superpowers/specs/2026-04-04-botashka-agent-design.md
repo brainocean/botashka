@@ -206,27 +206,36 @@ Every `emit!` call appends to `session-trace`. The trace is the single source of
 
 ## LLM Context Assembly
 
-`llm-context` is a pure function that selects and renders the relevant portion of `session-trace` as a token string for a given LLM call.
+`llm-context` is a pure function that assembles the full API payload for a given LLM call — system prompt plus the relevant slice of `session-trace` rendered as messages.
 
 ```clojure
 ;; botashka/llm_context.clj
 (defn llm-context
   "Given the full session-trace and the event type of the upcoming LLM call,
-  select and render the relevant subset as a token string.
-  Returns a string ready to include in the LLM :messages payload."
+  return a map {:system <string> :messages <string>} ready for the LLM API.
+  System prompt is a constant per call type; messages are selected from the trace."
   [session-trace event-type]
-  …)
+  {:system   (system-prompt event-type)
+   :messages (render-trace (select-events session-trace event-type))})
 ```
 
-Each event type routes to its own context pipeline:
+The system prompt is **configuration, not history** — it is fixed per call type and never stored in `session-trace`. The Anthropic API takes it as a separate top-level `system` field, so it belongs outside the messages array.
 
-| LLM call | Context selected |
-|---|---|
-| `:think` | user-input + plan + tool-index + last `:observe` result |
-| `:generate` | think decision + task-doc only (no history, no tool-index) |
-| `:plan` | user-input only |
+`llm_context.clj` owns all of:
+- `system-prompt` — constants per call type (replaces the scattered `think-system-prompt`, `plan-system-prompt` in react.clj / planner.clj)
+- `select-events` — filter pipeline per call type
+- `render-trace` — formats selected events as a string
+- `llm-context` — composes the above into the final API payload map
 
-The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (token budget) → **render** (format as string). No embedding, no vector search — the LLM reads the plain text index and trace.
+Each event type routes to its own pipeline:
+
+| LLM call | System prompt | Context selected from trace |
+|---|---|---|
+| `:plan` | Planner instructions | user-input only |
+| `:think` | ReAct THINK instructions | user-input + plan + tool-index + last `:observe` |
+| `:generate` | Code generation instructions | last `:think` decision only |
+
+The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (token budget) → **render** (format as string). No embedding, no vector search.
 
 ---
 

@@ -201,7 +201,7 @@ git commit -m "feat: LLM client with SSE streaming and parse-sse-token"
 - Create: `src/botashka/llm_context.clj`
 - Create: `test/botashka/llm_context_test.clj`
 
-`llm-context` is a pure function: given `session-trace` (the append-only event vector) and an `event-type` keyword identifying the upcoming LLM call, it selects the relevant trace slice and renders it as a token string. No mutable state. No side effects. Each event type has its own selection rule.
+`llm-context` is a pure function that returns `{:system <string> :messages <string>}` — the full API payload for a given LLM call. The system prompt is a **constant per call type** (configuration, not history — never stored in session-trace). The messages are assembled by selecting and rendering the relevant slice of session-trace. `llm_context.clj` also consolidates all system prompt constants, removing the scattered `*-system-prompt` vars from `react.clj` and `planner.clj`.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -210,7 +210,7 @@ Create `test/botashka/llm_context_test.clj`:
 ```clojure
 (ns botashka.llm-context-test
   (:require [clojure.test :refer [deftest is]]
-            [botashka.llm-context :refer [llm-context select-events render-trace]]))
+            [botashka.llm-context :refer [llm-context select-events render-trace system-prompt]]))
 
 (def sample-trace
   [{:type :user-input  :text "fetch the title of https://example.com"}
@@ -220,35 +220,38 @@ Create `test/botashka/llm_context_test.clj`:
    {:type :observe     :tool :fetch-url :result "<html>Example Domain</html>" :task "fetch"}])
 
 (deftest select-think-events
-  ;; :think LLM call needs: user-input, plan, and last observe
   (let [selected (select-events sample-trace :think)]
     (is (some #(= :user-input (:type %)) selected))
     (is (some #(= :plan (:type %)) selected))
     (is (some #(= :observe (:type %)) selected))))
 
 (deftest select-generate-events
-  ;; :generate LLM call needs only the think decision
   (let [trace (conj sample-trace {:type :think :text "{:decision :generate :tool-name :parse-title}" :task "parse"})
         selected (select-events trace :generate)]
     (is (= 1 (count selected)))
     (is (= :think (:type (first selected))))))
 
 (deftest select-plan-events
-  ;; :plan LLM call needs only user-input
   (let [selected (select-events sample-trace :plan)]
     (is (= 1 (count selected)))
     (is (= :user-input (:type (first selected))))))
 
 (deftest render-produces-string
-  (let [selected (select-events sample-trace :think)
-        result   (render-trace selected)]
+  (let [result (render-trace (select-events sample-trace :think))]
     (is (string? result))
     (is (seq result))))
 
-(deftest llm-context-returns-string
+(deftest system-prompt-returns-string
+  (is (string? (system-prompt :think)))
+  (is (string? (system-prompt :generate)))
+  (is (string? (system-prompt :plan))))
+
+(deftest llm-context-returns-map
   (let [ctx (llm-context sample-trace :think)]
-    (is (string? ctx))
-    (is (seq ctx))))
+    (is (map? ctx))
+    (is (string? (:system ctx)))
+    (is (string? (:messages ctx)))
+    (is (seq (:system ctx)))))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -263,32 +266,73 @@ Create `src/botashka/llm_context.clj`:
 ```clojure
 (ns botashka.llm-context)
 
+;; ---------------------------------------------------------------------------
+;; System prompts — constants per LLM call type (configuration, not history)
+;; The Anthropic API takes :system as a separate top-level field.
+;; ---------------------------------------------------------------------------
+
+(def ^:private prompts
+  {:plan
+   "You are Botashka's planner. Given a goal, decompose it into ordered steps.
+Return ONLY a Clojure EDN map of tasks (no markdown, no explanation) in this exact format:
+{step-name {:doc \"description\" :task (run-tool 'tool-name {:arg value})}
+ step-two  {:doc \"description\" :depends [step-name] :task (run-tool 'tool-name {:arg value})}}
+Use symbols (not strings) for task names. Use :depends for ordering. Keep steps small and focused."
+
+   :think
+   "You are Botashka's ReAct engine. Given a task and the available tool index,
+decide how to proceed. Return ONLY an EDN map (no markdown):
+
+To reuse an existing tool:
+{:decision :reuse :tool-name :keyword :args {:key value}}
+
+To generate a new tool:
+{:decision :generate :tool-name :keyword :description \"one line\" :spec-in \"type desc\" :spec-out \"type desc\"}
+
+To compose existing tools into a new tool:
+{:decision :compose :tool-name :keyword :description \"one line\" :tools-used [:kw1 :kw2] :spec-in \"type desc\" :spec-out \"type desc\"}
+
+To ask the human for clarification:
+{:decision :ask :question \"your question\"}"
+
+   :generate
+   "You are an expert Clojure/Babashka developer. Return only .clj source code.
+Must include: ns form, clojure.spec.alpha s/def or s/fdef for inputs and output, single defn.
+No markdown fences. No explanation."})
+
+(defn system-prompt
+  "Return the system prompt string for the given LLM call type."
+  [event-type]
+  (get prompts event-type "You are Botashka, a helpful Clojure agent."))
+
+;; ---------------------------------------------------------------------------
+;; select-events — filter pipeline per LLM call type
+;; ---------------------------------------------------------------------------
+
 (defmulti select-events
-  "Select the relevant subset of session-trace for a given LLM call type.
-  Dispatches on event-type keyword."
+  "Select the relevant subset of session-trace for a given LLM call type."
   (fn [_trace event-type] event-type))
 
 (defmethod select-events :plan [trace _]
-  ;; Planning only needs the user's goal
   (filterv #(= :user-input (:type %)) trace))
 
 (defmethod select-events :think [trace _]
-  ;; Thinking needs: user goal, plan, and last observation
   (let [keep? #{:user-input :plan}
         base  (filterv #(keep? (:type %)) trace)
         last-obs (last (filterv #(= :observe (:type %)) trace))]
     (cond-> base last-obs (conj last-obs))))
 
 (defmethod select-events :generate [trace _]
-  ;; Code generation needs only the last think decision
   [(last (filterv #(= :think (:type %)) trace))])
 
 (defmethod select-events :default [trace _]
   trace)
 
-(defmulti render-event
-  "Render a single trace event as a human-readable string for LLM consumption."
-  :type)
+;; ---------------------------------------------------------------------------
+;; render-trace — format selected events as a string for the messages payload
+;; ---------------------------------------------------------------------------
+
+(defmulti render-event :type)
 
 (defmethod render-event :user-input [{:keys [text]}]
   (str "User goal: " text))
@@ -306,18 +350,21 @@ Create `src/botashka/llm_context.clj`:
   (str (name (:type event)) ": " (pr-str (dissoc event :type))))
 
 (defn render-trace
-  "Render a sequence of selected trace events as a single token string."
+  "Render a sequence of selected trace events as a single string."
   [events]
   (clojure.string/join "\n" (map render-event (remove nil? events))))
 
+;; ---------------------------------------------------------------------------
+;; llm-context — pure fn assembling the full API payload map
+;; ---------------------------------------------------------------------------
+
 (defn llm-context
   "Pure fn: given session-trace and the event-type of the upcoming LLM call,
-  return a token string containing the relevant context.
+  return {:system <string> :messages <string>} ready for the LLM API.
   Usage: (llm-context session-trace :think)"
   [session-trace event-type]
-  (-> session-trace
-      (select-events event-type)
-      render-trace))
+  {:system   (system-prompt event-type)
+   :messages (render-trace (select-events session-trace event-type))})
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -605,14 +652,8 @@ Create `src/botashka/planner.clj`:
 (ns botashka.planner
   (:require [clojure.edn :as edn]
             [clojure.pprint :refer [pprint]]
-            [botashka.llm :as llm]))
-
-(def plan-system-prompt
-  "You are Botashka's planner. Given a goal, decompose it into ordered steps.
-Return ONLY a Clojure EDN map of tasks (no markdown, no explanation) in this exact format:
-{step-name {:doc \"description\" :task (run-tool 'tool-name {:arg value})}
- step-two  {:doc \"description\" :depends [step-name] :task (run-tool 'tool-name {:arg value})}}
-Use symbols (not strings) for task names. Use :depends for ordering. Keep steps small and focused.")
+            [botashka.llm :as llm]
+            [botashka.llm-context :as ctx]))
 
 (defn tasks-edn->map
   "Parse LLM-returned EDN string into a tasks map. Returns nil on parse failure."
@@ -634,14 +675,14 @@ Use symbols (not strings) for task names. Use :depends for ordering. Keep steps 
 (defn plan!
   "Ask LLM to decompose goal into tasks. Writes resulting tasks into bb-edn-path.
   Returns the tasks map."
-  [goal api-key bb-edn-path]
-  (let [messages [{:role "user"
-                   :content (str "Goal: " goal "\n\nReturn only the EDN tasks map.")}]
-        response  (llm/complete
-                    [{:role "system" :content plan-system-prompt}
-                     (first messages)]
-                    api-key)
-        tasks     (tasks-edn->map response)]
+  [goal api-key bb-edn-path session-trace]
+  (let [trace    (conj session-trace {:type :user-input :text goal})
+        payload  (ctx/llm-context trace :plan)
+        response (llm/complete
+                   [{:role "system" :content (:system payload)}
+                    {:role "user"   :content (str (:messages payload) "\n\nReturn only the EDN tasks map.")}]
+                   api-key)
+        tasks    (tasks-edn->map response)]
     (when tasks
       (write-plan! bb-edn-path tasks))
     tasks))
@@ -714,24 +755,9 @@ Create `src/botashka/react.clj`:
   (:require [clojure.edn :as edn]
             [babashka.process :as proc]
             [botashka.llm :as llm]
+            [botashka.llm-context :as ctx]
             [botashka.tools :as tools]
             [botashka.spec :as spec]))
-
-(def think-system-prompt
-  "You are Botashka's ReAct engine. Given a task and the available tool index,
-decide how to proceed. Return ONLY an EDN map (no markdown):
-
-To reuse an existing tool:
-{:decision :reuse :tool-name :keyword :args {:key value}}
-
-To generate a new tool:
-{:decision :generate :tool-name :keyword :description \"one line\" :spec-in \"type desc\" :spec-out \"type desc\"}
-
-To compose existing tools into a new tool:
-{:decision :compose :tool-name :keyword :description \"one line\" :tools-used [:kw1 :kw2] :spec-in \"type desc\" :spec-out \"type desc\"}
-
-To ask the human for clarification:
-{:decision :ask :question \"your question\"}")
 
 (defn parse-think-decision
   "Parse LLM think response EDN. Returns map or nil on failure."
@@ -751,8 +777,8 @@ To ask the human for clarification:
        :stdout ""
        :stderr (ex-message e)})))
 
-(defn generate-code-prompt
-  "Build the LLM prompt for code generation given a think decision and task context."
+(defn generate-user-prompt
+  "Build the user message for code generation given a think decision and task context."
   [decision task-doc tools-dir]
   (str "Generate a Babashka-compatible Clojure tool named " (name (:tool-name decision)) ".\n"
        "Task: " task-doc "\n"
@@ -763,9 +789,7 @@ To ask the human for clarification:
          (str "Must compose these existing tools: " used "\n"
               "Existing tool code:\n"
               (clojure.string/join "\n\n"
-                (map #(tools/load-tool-code tools-dir %) used))))
-       "\nReturn ONLY the .clj source code. No markdown fences. No explanation.\n"
-       "Must include: ns form, clojure.spec.alpha s/def or s/fdef for inputs and output, single defn."))
+                (map #(tools/load-tool-code tools-dir %) used))))))
 
 (defn react-step!
   "Run one ReAct iteration for a task step.
@@ -774,15 +798,17 @@ To ask the human for clarification:
   Returns {:status :ok/:error :result <string> :observation <string>}"
   [{:keys [task-doc session-trace tools-dir api-key emit! max-retries]
     :or   {max-retries 3}}]
-  (let [tool-index (tools/index-for-llm tools-dir)
-        think-resp (llm/complete
-                     [{:role "system" :content think-system-prompt}
-                      {:role "user"
-                       :content (str "Task: " task-doc
-                                     "\nAvailable tools:\n" tool-index
-                                     "\nDecide how to proceed. Return EDN only.")}]
-                     api-key)
-        decision   (parse-think-decision think-resp)]
+  (let [tool-index  (tools/index-for-llm tools-dir)
+        think-ctx   (ctx/llm-context session-trace :think)
+        think-resp  (llm/complete
+                      [{:role "system" :content (:system think-ctx)}
+                       {:role "user"
+                        :content (str (:messages think-ctx)
+                                      "\nTask: " task-doc
+                                      "\nAvailable tools:\n" tool-index
+                                      "\nDecide how to proceed. Return EDN only.")}]
+                      api-key)
+        decision    (parse-think-decision think-resp)]
 
     (when emit! (emit! {:type :think :text "Deciding how to proceed..."}))
 
@@ -796,13 +822,15 @@ To ask the human for clarification:
                 {:status (:status result) :result (:stdout result) :observation (:stdout result)})
 
       (:generate :compose)
-      (loop [attempt 1]
-        (let [gen-prompt  (generate-code-prompt decision task-doc tools-dir)
-              gen-code    (llm/complete
-                            [{:role "system" :content "You are an expert Clojure/Babashka developer. Return only .clj source code."}
-                             {:role "user" :content gen-prompt}]
-                            api-key)
-              validation  (spec/validate-tool-source gen-code)]
+      (loop [attempt 1
+             gen-trace (conj session-trace {:type :think :text think-resp :task task-doc})]
+        (let [gen-ctx    (ctx/llm-context gen-trace :generate)
+              user-msg   (generate-user-prompt decision task-doc tools-dir)
+              gen-code   (llm/complete
+                           [{:role "system" :content (:system gen-ctx)}
+                            {:role "user"   :content (str (:messages gen-ctx) "\n" user-msg)}]
+                           api-key)
+              validation (spec/validate-tool-source gen-code)]
           (if (= :ok (:status validation))
             (do
               (tools/save-tool! tools-dir (:tool-name decision) gen-code
@@ -817,7 +845,8 @@ To ask the human for clarification:
             (if (< attempt max-retries)
               (do
                 (when emit! (emit! {:type :validate :status :fail :attempt attempt :message (:message validation)}))
-                (recur (inc attempt)))
+                (recur (inc attempt)
+                       (conj gen-trace {:type :validate :status :fail :attempt attempt :message (:message validation)})))
               {:status :error :result nil :observation (str "Spec validation failed after " max-retries " attempts: " (:message validation))}))))
 
       {:status :error :result nil :observation (str "Unknown decision: " think-resp)})))
