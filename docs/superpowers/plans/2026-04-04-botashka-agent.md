@@ -998,6 +998,26 @@ Create `test/botashka/core_test.clj`:
   (let [[paths cleaned] (#'botashka.core/parse-at-paths "just a plain goal")]
     (is (= [] paths))
     (is (= "just a plain goal" cleaned))))
+
+(deftest task-status-open
+  (is (= :open (task-status [] :fetch))))
+
+(deftest task-status-in-progress
+  (is (= :in-progress
+         (task-status [{:type :think :task "fetch"}] :fetch))))
+
+(deftest task-status-finished
+  (is (= :finished
+         (task-status [{:type :think  :task "fetch"}
+                       {:type :execute :task "fetch"}
+                       {:type :observe :task "fetch" :result "ok"}]
+                      :fetch))))
+
+(deftest task-status-error
+  (is (= :error
+         (task-status [{:type :think :task "fetch"}
+                       {:type :error :task "fetch" :text "404"}]
+                      :fetch))))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1027,6 +1047,34 @@ Replace `src/botashka/core.clj` with:
 (defn- append-event! [event]
   (swap! session-trace conj event)
   event)
+
+;; ---------------------------------------------------------------------------
+;; task-status — derive task status from session-trace (pure fn)
+;; ---------------------------------------------------------------------------
+
+(defn task-status
+  "Derive the current status of a task from session-trace.
+  Returns :open | :in-progress | :finished | :error"
+  [trace task-name]
+  (let [tname  (name task-name)
+        events (filter #(= (:task %) tname) trace)]
+    (cond
+      (some #(= :error (:type %)) events)   :error
+      (some #(= :observe (:type %)) events) :finished
+      (some #(= :think (:type %)) events)   :in-progress
+      :else                                  :open)))
+
+(defn- update-bb-edn-status!
+  "Write derived :status into each bb.edn task entry — display only, not authoritative."
+  [bb-edn-path trace]
+  (let [config  (clojure.edn/read-string (slurp bb-edn-path))
+        updated (update config :tasks
+                         (fn [tasks]
+                           (reduce-kv
+                             (fn [m k v]
+                               (assoc m k (assoc v :status (task-status trace k))))
+                             {} tasks)))]
+    (spit bb-edn-path (with-out-str (clojure.pprint/pprint updated)))))
 
 (defn- api-key []
   (or (System/getenv "ANTHROPIC_API_KEY")
@@ -1123,6 +1171,7 @@ Replace `src/botashka/core.clj` with:
                                              :emit!         (fn [event]
                                                               (append-event! event)
                                                               (emit! event))})]
+              (update-bb-edn-status! bb-edn-path @session-trace)
               (when-let [output (:result result)]
                 (emit! {:type :answer :text output})))))))))
 
@@ -1298,6 +1347,8 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 - `:plan-amend` events — emitted before any bb.edn rewrite; included by `select-events :think`; rendered with reason + old/new task lists ✓
 - `parse-at-paths` — private fn, tested via `#'botashka.core/parse-at-paths`; returns `[paths cleaned-input]` ✓
 - `run-tasks!` — in react.clj; executes in-memory EDN task map without writing bb.edn; used by subagents and plan amendments ✓
+- `task-status` — pure fn in core.clj; derives `:open/:in-progress/:finished/:error` from session-trace; tested for all four states ✓
+- `update-bb-edn-status!` — private fn in core.clj; writes derived `:status` into bb.edn task entries after each step; display-only, never read back as ground truth ✓
 - `react-step!` opts — `{:task-doc :session-trace :tools-dir :api-key :emit! :max-retries}` — consistent from Task 7 onward ✓
 - `format-event` — pure fn, tested in Task 8, used only by `emit!` in core.clj ✓
 - `run-tool` — defined in core.clj (Task 8), referenced in bb.edn `:init` ✓

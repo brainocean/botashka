@@ -96,6 +96,48 @@ The parent agent writes bb.edn (human-visible, editable). Subagents carry their 
 | Programmatic subagent | In-memory EDN map | No |
 | Human-inspectable subagent | Separate bb.edn via `--config` | Yes — explicit opt-in |
 
+### Task Status
+
+Babashka's task runner has no built-in status — it runs a task or it doesn't. Botashka adds status as a **derived property of session-trace**, not a stored field:
+
+```clojure
+(defn task-status [session-trace task-name]
+  (let [events (filter #(= (:task %) (name task-name)) session-trace)]
+    (cond
+      (some #(= :error (:type %)) events)   :error
+      (some #(= :observe (:type %)) events) :finished
+      (some #(= :think (:type %)) events)   :in-progress
+      :else                                  :open)))
+```
+
+Status is a pure function of what already happened — it cannot be inconsistent with the trace. The four states match the standard agent todo model:
+
+| Status | Derived from trace |
+|---|---|
+| `:open` | No events for this task yet |
+| `:in-progress` | `:think` or `:execute` seen, no `:observe` yet |
+| `:finished` | `:observe` seen |
+| `:error` | `:error` event seen for this task |
+
+For human display, the agent optionally writes `:status` as an extra key into bb.edn task entries after each transition — Babashka ignores unknown keys, so it doesn't affect execution:
+
+```clojure
+{:tasks
+ {fetch-notes {:doc "Fetch HTML from target URL"
+               :status :finished                   ;; ← display only, derived from trace
+               :task (run-tool 'fetch-url {:url url})}
+  extract-ids {:doc "Parse SAP note IDs from HTML"
+               :status :in-progress
+               :depends [fetch-notes]
+               :task (run-tool 'parse-sap-ids {:html *result*})}
+  save-csv    {:doc "Write IDs to output.csv"
+               :status :open
+               :depends [extract-ids]
+               :task (run-tool 'write-csv {:rows *result*})}}}
+```
+
+The trace is authoritative. The `:status` field in bb.edn is a convenience for humans reading the file — it is always overwritten from the trace on each update, never read back as ground truth.
+
 ---
 
 ## ReAct Loop
@@ -331,6 +373,7 @@ botashka/
 | Planning substrate | bb.edn = human layer; in-memory EDN = execution layer | bb.edn is the human-editable window; subagents run from data, not files |
 | Plan mutation | Allowed, but only via explicit `:plan-amend` event | Silent rewrites lose reasoning chain; `:plan-amend` makes history queryable |
 | Subagent task lists | In-memory EDN map passed to `react-step!` loop | No bb.edn needed; `--config` available as opt-in for human-inspectable subagents |
+| Task status | Derived from `session-trace` via `task-status` pure fn | Trace is authoritative; `:status` in bb.edn is display-only convenience |
 | Runtime data structure | `session-trace` (append-only event vector) | Single source of truth for replay, debug, and context assembly |
 | Context assembly | `llm-context` pure fn in `llm_context.clj` | Selects relevant trace slice per LLM call — no embedding, no vector search |
 | Communication | `emit!` function (v1 println → nREPL `:out` in v2) | Single seam — transport swappable without touching agent core |
