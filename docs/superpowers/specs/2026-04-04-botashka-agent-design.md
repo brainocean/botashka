@@ -65,18 +65,28 @@ Example `bb.edn` written by the agent (`run-tool` is a Botashka-provided helper 
 
 ## ReAct Loop
 
-Each `bt/run` call triggers the ReAct loop for that task step:
+Each `bt/run` call triggers the ReAct loop for that task step. The loop has **4 steps**:
 
-1. **THINK** — LLM receives: task context + `tools/tool-index.edn` (all tool descriptions) + conversation history. Outputs: reasoning + decision — reuse existing tool, generate new tool, or ask human.
+1. **THINK** — LLM receives: task context + `tools/tool-index.edn` (all tool descriptions) + conversation history. Outputs: reasoning + one of three decisions:
 
-2. **ACT (reuse)** — Load `tools/<name>.clj`, bind args, execute in SCI directly.  
-   **ACT (generate)** — LLM writes a `.clj` snippet with a description comment, `:requires`, and clojure.spec definitions for input and output.
+   | Decision | Meaning |
+   |---|---|
+   | **Reuse** | An existing tool matches exactly — no new code generated |
+   | **Generate** | Novel logic needed — LLM writes a new `.clj` snippet |
+   | **Compose** | New glue code that calls existing tools together — LLM writes the composition |
 
-3. **VALIDATE** (generated tools only) — `spec/conform` on the new tool with sample inputs. Failure → error fed back to LLM for retry (max 3 attempts). Pass → tool saved to `tools/`, entry appended to `tool-index.edn`.
+   Reuse skips step 2 entirely and goes straight to EXECUTE. Generate and Compose both go through step 2.
 
-4. **EXECUTE** — `bb eval tools/<name>.clj` with bound args. stdout/stderr captured as observation. If SCI limit hit → spawn `clojure -M` subprocess as escape hatch.
+2. **GENERATE** (only for Generate and Compose decisions) — LLM writes a `.clj` snippet with a description comment, `:requires`, and clojure.spec definitions for input and output. **Spec validation happens immediately on the generated source** before anything else:
+   - `spec/conform` on the generated code structure and sample inputs
+   - Failure → error fed back to LLM for retry (max 3 attempts)
+   - Pass → tool saved to `tools/`, entry appended to `tool-index.edn`
 
-5. **OBSERVE** — result returned to LLM context. Loop continues until the task step is complete or needs human input.
+   The rule is simple: **any generated code is validated before execution, always** — whether it is novel logic or a composition of existing tools. A composed tool is saved to `tools/` like any other and becomes reusable.
+
+3. **EXECUTE** — run the tool (reused or freshly generated+validated) via `bb eval tools/<name>.clj` with bound args. stdout/stderr captured as observation. If SCI limit hit → spawn `clojure -M` subprocess as escape hatch.
+
+4. **OBSERVE** — result returned to LLM context. Loop continues until the task step is complete or needs human input.
 
 ---
 
