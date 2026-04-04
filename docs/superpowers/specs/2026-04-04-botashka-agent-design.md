@@ -212,13 +212,65 @@ botashka/
 | Validation | clojure.spec | Machine-checkable, instruments agent's own tools |
 | Planning | bb.edn tasks + `bt/run` | Human-inspectable, editable, dep-ordered |
 | Communication | core.async channels | UI-agnostic, backpressure, composable |
-| V1 UI | TUI (stdin/stdout) | Simplest first; channel abstraction enables future adapters |
+| V1 UI | `bb repl` + `start!` loop | Zero TUI code; `emit!` is the seam for future adapters |
+
+---
+
+## Future UI: nREPL Transport
+
+The preferred v2 UI path is **nREPL**, not a custom TUI. When Babashka runs `bb nrepl-server`, any nREPL client (CIDER, Calva, vim-iced, a custom terminal client) connects and receives Botashka output as standard nREPL `:out` messages — one per `println`. This means:
+
+- **Editor integration is free.** CIDER/Calva users get Botashka inline in their editor with zero extra code — just `(b/start!)` in the REPL.
+- **Custom TUI becomes a thin nREPL client.** It connects to the nREPL server and renders `:out` messages. No custom protocol, no channel plumbing at the UI layer.
+- **Any nREPL client is a valid Botashka UI** — the protocol is already defined.
+
+### The emit! migration path
+
+V1 `emit!` prints directly:
+
+```clojure
+(defn emit! [event]
+  (println (format-event event)))  ; → nREPL :out message automatically
+```
+
+V2 `emit!` dispatches explicitly to the nREPL session's transport — enabling push to multiple connected clients and finer-grained message types:
+
+```clojure
+(defn emit! [event]
+  (nrepl.transport/send *session* {:op "out" :out (format-event event)}))
+```
+
+The rest of the codebase does not change. `react-step!`, `planner`, and `tools` all call `emit!` — they are unaware of the transport.
+
+### Streaming via nREPL
+
+nREPL `:out` messages are sent per `println`/`flush` call. For token-by-token LLM streaming, each token triggers a separate `:out` message — this is fine for TUI rendering. The challenge is that SSE reading happens on a `future` thread, not the nREPL eval thread.
+
+**Solution:** Bind `*out*` in the `future` to the nREPL session's output stream using `nrepl.middleware.session/session-out`. This redirects all `print`/`println` calls from the streaming thread onto the correct nREPL session automatically:
+
+```clojure
+(future
+  (binding [*out* (nrepl.middleware.session/session-out :out session)]
+    (doseq [token (sse-token-seq response)]
+      (print token)
+      (flush))))  ; each flush → nREPL :out message to client
+```
+
+### UI Roadmap
+
+| Version | Interface | How |
+|---|---|---|
+| V1 | `bb repl` — `start!` read-line loop | Already done — zero extra code |
+| V2 | nREPL server — any nREPL client | Start `bb nrepl-server`, swap `emit!` body |
+| V3 | Custom TUI | Thin nREPL client that renders `:out` messages |
+| V4 | Telegram / WeChat | Adapter that bridges nREPL `:out` to bot API |
 
 ---
 
 ## Out of Scope (V1)
 
-- TUI adapter (stdin/stdout channel loop) — deferred; v1 uses Babashka nREPL (`bb nrepl-server`) as the interaction model
+- nREPL server mode — deferred to v2; v1 uses `bb repl` directly
+- TUI adapter — deferred to v3; nREPL client is the preferred v2 path
 - Telegram / WeChat adapters
 - Subagent parallelism via channels
 - Tool versioning / rollback
