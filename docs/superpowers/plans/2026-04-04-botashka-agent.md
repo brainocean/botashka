@@ -28,7 +28,7 @@
 | `test/botashka/planner_test.clj` | Tests for bb.edn task writing |
 | `test/botashka/react_test.clj` | Tests for ReAct loop decision routing |
 
-**Out of scope for v1:** `src/botashka/tui.clj` — deferred. `emit!` is the seam: v2 replaces its `println` body with `async/>!!` onto `:human-out` channel.
+**Out of scope for v1:** `src/botashka/tui.clj` — deferred to v3. v2 is nREPL server mode: swap `emit!` body to `nrepl.transport/send`, everything else stays the same.
 
 ---
 
@@ -574,8 +574,7 @@ Create `src/botashka/react.clj`:
             [babashka.process :as proc]
             [botashka.llm :as llm]
             [botashka.tools :as tools]
-            [botashka.spec :as spec]
-            [clojure.core.async :as async]))
+            [botashka.spec :as spec]))
 
 (def think-system-prompt
   "You are Botashka's ReAct engine. Given a task and the available tool index,
@@ -629,31 +628,29 @@ To ask the human for clarification:
 
 (defn react-step!
   "Run one ReAct iteration for a task step.
+  emit! is a function (fn [event-map] ...) for output — nil-safe, pass nil to suppress output.
   Returns {:status :ok/:error :result <string> :observation <string>}"
-  [{:keys [task-doc history tools-dir api-key out-ch max-retries]
+  [{:keys [task-doc history tools-dir api-key emit! max-retries]
     :or   {max-retries 3}}]
   (let [tool-index (tools/index-for-llm tools-dir)
-        think-messages (into history
-                              [{:role "user"
-                                :content (str "Task: " task-doc
-                                              "\nAvailable tools:\n" tool-index
-                                              "\nDecide how to proceed. Return EDN only.")}])
         think-resp (llm/complete
                      [{:role "system" :content think-system-prompt}
-                      (last think-messages)]
+                      {:role "user"
+                       :content (str "Task: " task-doc
+                                     "\nAvailable tools:\n" tool-index
+                                     "\nDecide how to proceed. Return EDN only.")}]
                      api-key)
         decision   (parse-think-decision think-resp)]
 
-    (when out-ch
-      (async/>!! out-ch {:type :info :text (str "[THINK] " think-resp)}))
+    (when emit! (emit! {:type :think :text "Deciding how to proceed..."}))
 
     (case (:decision decision)
       :ask    {:status :ask :question (:question decision)}
 
       :reuse  (let [code   (tools/load-tool-code tools-dir (:tool-name decision))
                     result (execute-tool code (:args decision))]
-                (when out-ch
-                  (async/>!! out-ch {:type :info :text (str "[EXECUTE] " (:tool-name decision))}))
+                (when emit! (emit! {:type :reuse :text (name (:tool-name decision))}))
+                (when emit! (emit! {:type :execute :text (name (:tool-name decision))}))
                 {:status (:status result) :result (:stdout result) :observation (:stdout result)})
 
       (:generate :compose)
@@ -670,14 +667,14 @@ To ask the human for clarification:
                                 {:description (:description decision)
                                  :spec-in     (:spec-in decision)
                                  :spec-out    (:spec-out decision)})
-              (when out-ch
-                (async/>!! out-ch {:type :info :text (str "[GENERATE] saved " (name (:tool-name decision)))}))
+              (when emit! (emit! {:type :generate :text (name (:tool-name decision))}))
+              (when emit! (emit! {:type :validate :status :ok}))
               (let [result (execute-tool gen-code {})]
+                (when emit! (emit! {:type :execute :text (name (:tool-name decision))}))
                 {:status (:status result) :result (:stdout result) :observation (:stdout result)}))
             (if (< attempt max-retries)
               (do
-                (when out-ch
-                  (async/>!! out-ch {:type :info :text (str "[VALIDATE] attempt " attempt " failed: " (:message validation))}))
+                (when emit! (emit! {:type :validate :status :fail :attempt attempt :message (:message validation)}))
                 (recur (inc attempt)))
               {:status :error :result nil :observation (str "Spec validation failed after " max-retries " attempts: " (:message validation))}))))
 
@@ -912,36 +909,11 @@ Expected: `[thinking]` line, then agent generates/reuses a tool, prints `4`, ret
 Type: `exit`
 Expected: `Goodbye.` and return to `user=>` prompt.
 
-- [ ] **Step 7: Also update react-step! to accept :emit! instead of :out-ch**
-
-In `src/botashka/react.clj`, replace all `(when out-ch (async/>!! out-ch …))` calls with `(when emit! (emit! …))`. Update the function signature's destructuring: replace `:out-ch` with `:emit!`.
-
-This is the key wiring that makes `emit!` the single output seam for the entire agent — react loop events flow through it too.
-
-Updated react.clj destructuring and emit calls:
-
-```clojure
-(defn react-step!
-  [{:keys [task-doc history tools-dir api-key emit! max-retries]
-    :or   {max-retries 3}}]
-  ;; ... replace every:
-  ;;   (when out-ch (async/>!! out-ch {:type :info :text ...}))
-  ;; with:
-  ;;   (when emit! (emit! {:type :think/:reuse/:generate/:validate/:execute :text ...}))
-  )
-```
-
-Specific replacements in `react-step!`:
-- `{:type :info :text (str "[THINK] " think-resp)}` → `{:type :think :text "Deciding how to proceed..."}`
-- `{:type :info :text (str "[EXECUTE] " ...)}` → `{:type :execute :text (name (:tool-name decision))}`
-- `{:type :info :text (str "[GENERATE] saved " ...)}` → `{:type :generate :text (name (:tool-name decision))}`
-- `{:type :info :text (str "[VALIDATE] attempt " ...)}` → `{:type :validate :status :fail :attempt attempt :message (:message validation)}`
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/botashka/core.clj src/botashka/react.clj bb.edn test/botashka/core_test.clj
-git commit -m "feat: REPL loop — start!/emit! output seam, run-tool, react wiring"
+git add src/botashka/core.clj bb.edn test/botashka/core_test.clj
+git commit -m "feat: REPL loop — start!/emit! output seam, run-tool"
 ```
 
 ---
@@ -1033,23 +1005,22 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 | Spec section | Covered by task |
 |---|---|
 | Babashka runtime + bb.edn scaffold | Task 1 |
-| LLM client (non-streaming v1) | Task 2 |
+| LLM client — non-streaming `complete` for v1 | Task 2 |
 | Tool library CRUD + index | Task 3 |
 | clojure.spec validation | Task 4 |
-| Planning layer (goal → bb.edn tasks) | Task 5 |
-| ReAct loop (THINK/GENERATE/EXECUTE/OBSERVE) | Task 6 |
-| REPL loop + emit! output seam + core wiring | Task 7 |
-| Seed tool library | Task 8 |
-| Channel seam for v2 TUI | `emit!` in core.clj + `:emit!` key in react-step! — documented in Task 7 |
-| Streaming (v2) | Deferred — `llm/complete` used for now; `stream-chat` stub in place |
-| TUI adapter | Deferred — `emit!` is the seam |
+| Planning layer (goal → bb.edn tasks via `run-tool`) | Task 5 |
+| ReAct loop — THINK/GENERATE/EXECUTE/OBSERVE with `:emit!` | Task 6 |
+| REPL loop + `emit!` + `format-event` + `start!` | Task 7 |
+| Seed tool library (`fetch-url`, `write-file`) | Task 8 |
+| nREPL v2 migration path | Documented in spec; `emit!` is the seam — no plan task needed |
 
 **Placeholder scan:** No TBDs or TODOs found.
 
 **Type consistency check:**
 - `tools-dir` — string `"tools"`, consistent across tools.clj, react.clj, core.clj ✓
 - `api-key` — string from `(api-key)` helper in core.clj ✓
-- `emit!` — function `(fn [event] …)`, passed as `:emit!` key in react-step! opts map; nil-safe with `(when emit! …)` ✓
-- `format-event` — defined and tested in core.clj, used only by `emit!` ✓
-- `react-step!` opts — `{:task-doc :history :tools-dir :api-key :emit! :max-retries}` — consistent between Task 6 impl and Task 7 callers ✓
-- `run-tool` — defined in core.clj, referenced in bb.edn `:init` ✓
+- `emit!` — `(fn [event-map] …)`, passed as `:emit!` in react-step! opts; nil-safe with `(when emit! …)`; no `:out-ch` anywhere ✓
+- `react-step!` opts — `{:task-doc :history :tools-dir :api-key :emit! :max-retries}` — consistent from Task 6 onward ✓
+- `format-event` — pure fn, tested in Task 7, used only by `emit!` in core.clj ✓
+- `run-tool` — defined in core.clj (Task 7), referenced in bb.edn `:init` ✓
+- Seed tools: `fetch-url` and `write-file` — consistent between Task 8 and spec tool index example ✓

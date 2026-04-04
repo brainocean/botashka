@@ -121,9 +121,9 @@ Each tool is a single `.clj` file in `tools/`:
 {:fetch-url {:description "Fetch the body of an HTTP URL as a string"
              :spec-in     "string? (valid URL)"
              :spec-out    "string? (response body)"}
- :write-csv {:description "Write a seq of maps to a CSV file at path"
-             :spec-in     "map with :rows (seq of maps) and :path (string)"
-             :spec-out    "string? (absolute path written)"}}
+ :write-file {:description "Write a string to a file at the given path, returns the path"
+              :spec-in     "map with :path (string) and :content (string)"
+              :spec-out    "string? (absolute path written)"}}
 ```
 
 The LLM always receives `tool-index.edn` in its context. After generating a new tool, the agent appends its entry to the index before saving the `.clj` file.
@@ -196,8 +196,9 @@ botashka/
 | Action space | Generated Clojure snippets | CodeAct: more expressive than JSON tool calls |
 | Tool selection | LLM reads index | Keeps decision in one place, no embedding overhead |
 | Validation | clojure.spec | Machine-checkable, instruments agent's own tools |
-| Planning | bb.edn tasks + `bt/run` | Human-inspectable, editable, dep-ordered |
-| Communication | `emit!` function (v1 println; v2 nREPL transport) | Single seam — transport swappable without touching agent core |
+| Planning | bb.edn tasks + `run-tool` helper | Human-inspectable, editable; `bt/run` executes each step |
+| Communication | `emit!` function (v1 println → nREPL `:out` in v2) | Single seam — transport swappable without touching agent core |
+| LLM v1 | Non-streaming `complete` wrapping SSE | Simple for v1; `stream-chat` is the v2 upgrade path |
 | V1 UI | `bb repl` + `start!` loop | Zero TUI code; `emit!` is the seam for future adapters |
 
 ---
