@@ -210,36 +210,45 @@ Create `test/botashka/llm_context_test.clj`:
 ```clojure
 (ns botashka.llm-context-test
   (:require [clojure.test :refer [deftest is]]
-            [botashka.llm-context :refer [llm-context select-events render-trace system-prompt]]))
+            [botashka.llm-context :refer [llm-context select-events render-trace system-prompt truncate-content]]))
 
 (def sample-trace
-  [{:type :user-input  :text "fetch the title of https://example.com"}
-   {:type :plan        :tasks [{:name "fetch" :doc "Fetch HTML"} {:name "parse" :doc "Extract title"}]}
-   {:type :think       :text "Deciding..." :task "fetch"}
-   {:type :execute     :tool :fetch-url :args {:url "https://example.com"} :task "fetch"}
-   {:type :observe     :tool :fetch-url :result "<html>Example Domain</html>" :task "fetch"}])
+  [{:type :file-context :path "src/foo.clj" :content "(ns foo)\n(defn bar [] :bar)"}
+   {:type :user-input   :text "refactor src/foo.clj to add a spec"}
+   {:type :plan         :tasks [{:name "refactor" :doc "Add spec to foo"}]}
+   {:type :think        :text "Deciding..." :task "refactor"}
+   {:type :execute      :tool :fetch-url :args {:url "https://example.com"} :task "refactor"}
+   {:type :observe      :tool :fetch-url :result "<html>Example Domain</html>" :task "refactor"}])
 
-(deftest select-think-events
+(deftest select-think-includes-file-context
   (let [selected (select-events sample-trace :think)]
+    (is (some #(= :file-context (:type %)) selected))
     (is (some #(= :user-input (:type %)) selected))
-    (is (some #(= :plan (:type %)) selected))
     (is (some #(= :observe (:type %)) selected))))
 
+(deftest select-plan-includes-file-context
+  (let [selected (select-events sample-trace :plan)]
+    (is (some #(= :file-context (:type %)) selected))
+    (is (some #(= :user-input (:type %)) selected))))
+
 (deftest select-generate-events
-  (let [trace (conj sample-trace {:type :think :text "{:decision :generate :tool-name :parse-title}" :task "parse"})
+  (let [trace (conj sample-trace {:type :think :text "{:decision :generate :tool-name :parse-title}" :task "refactor"})
         selected (select-events trace :generate)]
     (is (= 1 (count selected)))
     (is (= :think (:type (first selected))))))
 
-(deftest select-plan-events
-  (let [selected (select-events sample-trace :plan)]
-    (is (= 1 (count selected)))
-    (is (= :user-input (:type (first selected))))))
+(deftest truncate-content-limits-length
+  (let [long-str (apply str (repeat 10000 "x"))
+        truncated (truncate-content long-str 8000)]
+    (is (<= (count truncated) 8000))))
+
+(deftest truncate-content-passes-short-strings
+  (is (= "hello" (truncate-content "hello" 8000))))
 
 (deftest render-produces-string
   (let [result (render-trace (select-events sample-trace :think))]
     (is (string? result))
-    (is (seq result))))
+    (is (re-find #"src/foo.clj" result))))
 
 (deftest system-prompt-returns-string
   (is (string? (system-prompt :think)))
@@ -306,6 +315,20 @@ No markdown fences. No explanation."})
   (get prompts event-type "You are Botashka, a helpful Clojure agent."))
 
 ;; ---------------------------------------------------------------------------
+;; truncation — cap large content fields before rendering
+;; ---------------------------------------------------------------------------
+
+(def file-context-limit 8000)
+(def observe-limit 4000)
+
+(defn truncate-content
+  "Truncate s to at most limit characters, appending a note if truncated."
+  [s limit]
+  (if (<= (count s) limit)
+    s
+    (str (subs s 0 limit) "\n… [truncated]")))
+
+;; ---------------------------------------------------------------------------
 ;; select-events — filter pipeline per LLM call type
 ;; ---------------------------------------------------------------------------
 
@@ -314,15 +337,18 @@ No markdown fences. No explanation."})
   (fn [_trace event-type] event-type))
 
 (defmethod select-events :plan [trace _]
-  (filterv #(= :user-input (:type %)) trace))
+  ;; Planning needs file context (if any) + user goal
+  (filterv #(#{:file-context :user-input} (:type %)) trace))
 
 (defmethod select-events :think [trace _]
-  (let [keep? #{:user-input :plan}
+  ;; Thinking needs file context + user goal + plan + last observation
+  (let [keep? #{:file-context :user-input :plan}
         base  (filterv #(keep? (:type %)) trace)
         last-obs (last (filterv #(= :observe (:type %)) trace))]
     (cond-> base last-obs (conj last-obs))))
 
 (defmethod select-events :generate [trace _]
+  ;; Code generation needs only the last think decision
   [(last (filterv #(= :think (:type %)) trace))])
 
 (defmethod select-events :default [trace _]
@@ -334,6 +360,9 @@ No markdown fences. No explanation."})
 
 (defmulti render-event :type)
 
+(defmethod render-event :file-context [{:keys [path content]}]
+  (str "File " path ":\n" (truncate-content content file-context-limit)))
+
 (defmethod render-event :user-input [{:keys [text]}]
   (str "User goal: " text))
 
@@ -344,7 +373,9 @@ No markdown fences. No explanation."})
   (str (when task (str "[" task "] ")) "Think: " text))
 
 (defmethod render-event :observe [{:keys [tool result task]}]
-  (str (when task (str "[" task "] ")) "Observation from " (name tool) ": " result))
+  (str (when task (str "[" task "] "))
+       "Observation from " (name tool) ": "
+       (truncate-content result observe-limit)))
 
 (defmethod render-event :default [event]
   (str (name (:type event)) ": " (pr-str (dissoc event :type))))
@@ -376,7 +407,7 @@ Expected: PASS
 
 ```bash
 git add src/botashka/llm_context.clj test/botashka/llm_context_test.clj
-git commit -m "feat: llm-context — pure context assembly from session-trace"
+git commit -m "feat: llm-context — context assembly with @file support and truncation"
 ```
 
 ---
@@ -931,6 +962,16 @@ Create `test/botashka/core_test.clj`:
 (deftest format-event-error
   (is (= "[error] something went wrong"
          (format-event {:type :error :text "something went wrong"}))))
+
+(deftest parse-at-paths-extracts-paths
+  (let [[paths cleaned] (#'botashka.core/parse-at-paths "refactor @src/foo.clj and @src/bar.clj")]
+    (is (= ["src/foo.clj" "src/bar.clj"] paths))
+    (is (= "refactor src/foo.clj and src/bar.clj" cleaned))))
+
+(deftest parse-at-paths-no-refs
+  (let [[paths cleaned] (#'botashka.core/parse-at-paths "just a plain goal")]
+    (is (= [] paths))
+    (is (= "just a plain goal" cleaned))))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1012,29 +1053,52 @@ Replace `src/botashka/core.clj` with:
     result))
 
 ;; ---------------------------------------------------------------------------
+;; @path parsing — extract file references from user input
+;; ---------------------------------------------------------------------------
+
+(defn- parse-at-paths
+  "Extract @path tokens from input string. Returns [paths cleaned-input].
+  '@src/foo.clj refactor it' → [['src/foo.clj'] 'src/foo.clj refactor it']"
+  [input]
+  (let [paths (mapv second (re-seq #"@(\S+)" input))
+        cleaned (clojure.string/replace input #"@" "")]
+    [paths cleaned]))
+
+(defn- load-file-contexts!
+  "Read each path and append a :file-context event to session-trace.
+  Skips files that don't exist with a warning emit."
+  [paths]
+  (doseq [path paths]
+    (if (.exists (java.io.File. path))
+      (append-event! {:type :file-context :path path :content (slurp path)})
+      (emit! {:type :error :text (str "@" path " not found")}))))
+
+;; ---------------------------------------------------------------------------
 ;; start! — REPL interaction loop
 ;; ---------------------------------------------------------------------------
 
-(defn- run-goal! [goal]
-  (append-event! {:type :user-input :text goal})
-  (emit! {:type :think :text "Planning..."})
-  (let [tasks (planner/plan! goal (api-key) bb-edn-path)]
-    (if-not tasks
-      (emit! {:type :error :text "Could not parse plan from LLM response."})
-      (do
-        (append-event! {:type :plan :tasks (mapv (fn [[k v]] {:name (name k) :doc (:doc v)}) tasks)})
-        (emit! {:type :answer :text (str "Plan: " (count tasks) " steps → " (clojure.string/join ", " (map name (keys tasks))))})
-        (doseq [[task-name task] tasks]
-          (emit! {:type :think :text (str "Step: " (name task-name) " — " (:doc task))})
-          (let [result (react/react-step! {:task-doc      (:doc task (name task-name))
-                                           :session-trace @session-trace
-                                           :tools-dir     tools-dir
-                                           :api-key       (api-key)
-                                           :emit!         (fn [event]
-                                                            (append-event! event)
-                                                            (emit! event))})]
-            (when-let [output (:result result)]
-              (emit! {:type :answer :text output}))))))))
+(defn- run-goal! [raw-input]
+  (let [[paths goal] (parse-at-paths raw-input)]
+    (load-file-contexts! paths)
+    (append-event! {:type :user-input :text goal})
+    (emit! {:type :think :text "Planning..."})
+    (let [tasks (planner/plan! goal (api-key) bb-edn-path @session-trace)]
+      (if-not tasks
+        (emit! {:type :error :text "Could not parse plan from LLM response."})
+        (do
+          (append-event! {:type :plan :tasks (mapv (fn [[k v]] {:name (name k) :doc (:doc v)}) tasks)})
+          (emit! {:type :answer :text (str "Plan: " (count tasks) " steps → " (clojure.string/join ", " (map name (keys tasks))))})
+          (doseq [[task-name task] tasks]
+            (emit! {:type :think :text (str "Step: " (name task-name) " — " (:doc task))})
+            (let [result (react/react-step! {:task-doc      (:doc task (name task-name))
+                                             :session-trace @session-trace
+                                             :tools-dir     tools-dir
+                                             :api-key       (api-key)
+                                             :emit!         (fn [event]
+                                                              (append-event! event)
+                                                              (emit! event))})]
+              (when-let [output (:result result)]
+                (emit! {:type :answer :text output})))))))))
 
 (defn start!
   "Start Botashka's conversational REPL loop. Type goals in natural language.
@@ -1203,9 +1267,12 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 - `tools-dir` — string `"tools"`, consistent across tools.clj, react.clj, core.clj ✓
 - `api-key` — string from `(api-key)` helper in core.clj ✓
 - `emit!` — `(fn [event-map] …)`, passed as `:emit!` in react-step! opts; nil-safe with `(when emit! …)`; no `:out-ch` anywhere ✓
-- `session-trace` — `(atom [])` in core.clj; passed as `@session-trace` (dereffed) to react-step! opts ✓
+- `session-trace` — `(atom [])` in core.clj; passed as `@session-trace` (dereffed) to react-step! and planner/plan! ✓
+- `:file-context` events — prepended before `:user-input` by `load-file-contexts!` in core.clj; included by `select-events :think` and `:plan`; truncated at 8 000 chars in `render-event` ✓
+- `parse-at-paths` — private fn, tested via `#'botashka.core/parse-at-paths`; returns `[paths cleaned-input]` ✓
 - `react-step!` opts — `{:task-doc :session-trace :tools-dir :api-key :emit! :max-retries}` — consistent from Task 7 onward ✓
 - `format-event` — pure fn, tested in Task 8, used only by `emit!` in core.clj ✓
 - `run-tool` — defined in core.clj (Task 8), referenced in bb.edn `:init` ✓
-- `llm-context` — pure fn in llm_context.clj; called from react.clj THINK step with `(llm-context session-trace :think)` ✓
+- `llm-context` — pure fn in llm_context.clj; called from react.clj THINK/GENERATE and planner.clj ✓
+- `truncate-content` — pure fn in llm_context.clj; used by `render-event :file-context` (8 000 chars) and `:observe` (4 000 chars) ✓
 - Seed tools: `fetch-url` and `write-file` — consistent between Task 9 and spec tool index example ✓

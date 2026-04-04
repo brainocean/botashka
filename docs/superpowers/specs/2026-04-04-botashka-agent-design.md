@@ -186,10 +186,30 @@ All agent output goes through a single `emit!` function in `core.clj`. This is t
 
 Every `emit!` call appends to `session-trace`. The trace is the single source of truth for replay, debugging, and LLM context assembly.
 
+### File context — @path syntax
+
+Users can reference files inline using `@path` syntax:
+
+```
+🤖 botashka> refactor @src/botashka/react.clj to use the new llm-context API
+```
+
+`core.clj` parses `@path` tokens from the raw input before appending `:user-input`. For each token it reads the file and prepends a `:file-context` event:
+
+```clojure
+[{:type :file-context :path "src/botashka/react.clj" :content "…full file text…"}
+ {:type :user-input   :text "refactor src/botashka/react.clj to use the new llm-context API"}]
+```
+
+The `@path` token in `:user-input` is replaced with the plain path string (no `@`). `select-events` for `:think` includes all `:file-context` events that precede the current `:user-input`, so the LLM always sees referenced file contents when reasoning about a task.
+
+Because file contents can be large, the **truncate** step in the context pipeline is the primary defence against token overflow. Each `:file-context` entry is truncated to a configurable character limit before rendering; the limit defaults to 8 000 characters per file.
+
 ### Event types
 
 | Type | When | Key fields |
 |---|---|---|
+| `:file-context` | User references `@path` in input | `:path`, `:content` |
 | `:user-input` | User types a goal | `:text` |
 | `:plan` | Planner decomposes goal | `:tasks` |
 | `:think` | LLM decides reuse/generate/compose | `:text`, `:task` |
@@ -231,11 +251,11 @@ Each event type routes to its own pipeline:
 
 | LLM call | System prompt | Context selected from trace |
 |---|---|---|
-| `:plan` | Planner instructions | user-input only |
-| `:think` | ReAct THINK instructions | user-input + plan + tool-index + last `:observe` |
+| `:plan` | Planner instructions | file-context + user-input only |
+| `:think` | ReAct THINK instructions | file-context + user-input + plan + tool-index + last `:observe` |
 | `:generate` | Code generation instructions | last `:think` decision only |
 
-The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (token budget) → **render** (format as string). No embedding, no vector search.
+The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (cap each `:file-context` entry at 8 000 chars; cap `:observe` results at 4 000 chars) → **render** (format as string). No embedding, no vector search.
 
 ---
 
