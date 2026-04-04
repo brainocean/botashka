@@ -43,9 +43,11 @@ The agent uses `bb.edn` as its live, human-readable plan. When given a goal:
 2. Agent writes these as `:tasks` entries into `bb.edn` (pure EDN write — no special API needed)
 3. Human can inspect and edit `bb.edn` before or during execution
 4. Agent executes each task via `(babashka.tasks/run 'task-name)` — Babashka handles dependency ordering automatically
-5. Agent can amend the plan mid-execution by rewriting `bb.edn` and re-running
+5. Agent can amend the plan mid-execution — see **Plan Mutation** below
 
 Each task entry has a `:doc` string describing its purpose, making `bb.edn` a human-readable progress log.
+
+**bb.edn is the human interaction layer, not the execution substrate.** The agent can run tasks without bb.edn — it executes task lists as plain in-memory EDN data. bb.edn is the window the human looks through: inspectable, editable, committed to git.
 
 Example `bb.edn` written by the agent (`run-tool` is a Botashka-provided helper defined in `:init` that triggers the ReAct loop for a named tool with given args):
 ```clojure
@@ -60,6 +62,39 @@ Example `bb.edn` written by the agent (`run-tool` is a Botashka-provided helper 
                 :doc "Write IDs to output.csv"
                 :task (run-tool 'write-csv {:rows *result*})}}}
 ```
+
+### Plan Mutation
+
+The LLM is allowed to amend the plan mid-execution — for example when an `:observe` result reveals a different structure than expected, a tool fails, or the goal turns out to be more complex. Forcing it to finish the original plan anyway is brittle.
+
+Plan mutation is **always explicit**: the agent emits a `:plan-amend` event before rewriting bb.edn, recording why the plan changed and what was replaced:
+
+```clojure
+{:type      :plan-amend
+ :reason    "fetch-url returned 404 — switching to scrape-via-proxy"
+ :old-tasks [:fetch :parse]
+ :new-tasks [:proxy-fetch :parse]}
+```
+
+`select-events :think` includes `:plan-amend` events so the LLM has full context about what has already been tried and why it changed. Silent rewrites are not allowed — every plan change must produce a `:plan-amend` event in the trace.
+
+### Subagents and Task Lists
+
+Babashka does not support multiple bb.edn files in a single project — `bb` looks for one bb.edn at the project root. For subagents spawned programmatically mid-session, bb.edn is not used. Instead, the subagent's task list is passed as a plain in-memory EDN map (same shape as bb.edn `:tasks`) and executed directly via `react-step!` calls in a loop — no file write needed.
+
+```clojure
+;; subagent task list — plain EDN data, never written to bb.edn
+{fetch  {:doc "Fetch the page" :task …}
+ parse  {:doc "Extract the data" :depends [fetch] :task …}}
+```
+
+The parent agent writes bb.edn (human-visible, editable). Subagents carry their task list as data. If a human-inspectable plan per subagent is needed, `bb --config .sessions/<task-id>/bb.edn run` can point Babashka at a per-subagent config file — but this is an escape hatch, not the default path.
+
+| Agent type | Task list format | bb.edn written? |
+|---|---|---|
+| Root agent | bb.edn `:tasks` map | Yes — human-editable |
+| Programmatic subagent | In-memory EDN map | No |
+| Human-inspectable subagent | Separate bb.edn via `--config` | Yes — explicit opt-in |
 
 ---
 
@@ -218,6 +253,7 @@ Because file contents can be large, the **truncate** step in the context pipelin
 | `:validate` | Spec check result | `:tool`, `:status`, `:attempt`, `:message`, `:task` |
 | `:execute` | Tool runs (bb eval subprocess) | `:tool`, `:args`, `:task` |
 | `:observe` | Tool result captured | `:tool`, `:result`, `:task` |
+| `:plan-amend` | Agent revises the plan mid-execution | `:reason`, `:old-tasks`, `:new-tasks` |
 | `:assistant-out` | Final answer to user | `:text` |
 | `:error` | Any failure | `:text` |
 | `:ask` | Agent needs human clarification | `:text` |
@@ -252,7 +288,7 @@ Each event type routes to its own pipeline:
 | LLM call | System prompt | Context selected from trace |
 |---|---|---|
 | `:plan` | Planner instructions | file-context + user-input only |
-| `:think` | ReAct THINK instructions | file-context + user-input + plan + tool-index + last `:observe` |
+| `:think` | ReAct THINK instructions | file-context + user-input + plan + plan-amend history + tool-index + last `:observe` |
 | `:generate` | Code generation instructions | last `:think` decision only |
 
 The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (cap each `:file-context` entry at 8 000 chars; cap `:observe` results at 4 000 chars) → **render** (format as string). No embedding, no vector search.
@@ -292,7 +328,9 @@ botashka/
 | Action space | Generated Clojure snippets | CodeAct: more expressive than JSON tool calls |
 | Tool selection | LLM reads index | Keeps decision in one place, no embedding overhead |
 | Validation | clojure.spec | Machine-checkable, instruments agent's own tools |
-| Planning | bb.edn tasks + `run-tool` helper | Human-inspectable, editable; `bt/run` executes each step |
+| Planning substrate | bb.edn = human layer; in-memory EDN = execution layer | bb.edn is the human-editable window; subagents run from data, not files |
+| Plan mutation | Allowed, but only via explicit `:plan-amend` event | Silent rewrites lose reasoning chain; `:plan-amend` makes history queryable |
+| Subagent task lists | In-memory EDN map passed to `react-step!` loop | No bb.edn needed; `--config` available as opt-in for human-inspectable subagents |
 | Runtime data structure | `session-trace` (append-only event vector) | Single source of truth for replay, debug, and context assembly |
 | Context assembly | `llm-context` pure fn in `llm_context.clj` | Selects relevant trace slice per LLM call — no embedding, no vector search |
 | Communication | `emit!` function (v1 println → nREPL `:out` in v2) | Single seam — transport swappable without touching agent core |

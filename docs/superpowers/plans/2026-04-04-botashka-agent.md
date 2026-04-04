@@ -237,6 +237,13 @@ Create `test/botashka/llm_context_test.clj`:
     (is (= 1 (count selected)))
     (is (= :think (:type (first selected))))))
 
+(deftest select-think-includes-plan-amend
+  (let [trace (conj sample-trace {:type :plan-amend
+                                  :reason "404 — switching strategy"
+                                  :old-tasks [:fetch] :new-tasks [:proxy-fetch]})
+        selected (select-events trace :think)]
+    (is (some #(= :plan-amend (:type %)) selected))))
+
 (deftest truncate-content-limits-length
   (let [long-str (apply str (repeat 10000 "x"))
         truncated (truncate-content long-str 8000)]
@@ -341,8 +348,8 @@ No markdown fences. No explanation."})
   (filterv #(#{:file-context :user-input} (:type %)) trace))
 
 (defmethod select-events :think [trace _]
-  ;; Thinking needs file context + user goal + plan + last observation
-  (let [keep? #{:file-context :user-input :plan}
+  ;; Thinking needs file context + user goal + plan + all plan amendments + last observation
+  (let [keep? #{:file-context :user-input :plan :plan-amend}
         base  (filterv #(keep? (:type %)) trace)
         last-obs (last (filterv #(= :observe (:type %)) trace))]
     (cond-> base last-obs (conj last-obs))))
@@ -368,6 +375,11 @@ No markdown fences. No explanation."})
 
 (defmethod render-event :plan [{:keys [tasks]}]
   (str "Plan: " (clojure.string/join ", " (map :name tasks))))
+
+(defmethod render-event :plan-amend [{:keys [reason old-tasks new-tasks]}]
+  (str "Plan amended — " reason
+       "\n  was: " (clojure.string/join ", " (map name old-tasks))
+       "\n  now: " (clojure.string/join ", " (map name new-tasks))))
 
 (defmethod render-event :think [{:keys [text task]}]
   (str (when task (str "[" task "] ")) "Think: " text))
@@ -881,6 +893,20 @@ Create `src/botashka/react.clj`:
               {:status :error :result nil :observation (str "Spec validation failed after " max-retries " attempts: " (:message validation))}))))
 
       {:status :error :result nil :observation (str "Unknown decision: " think-resp)})))
+
+(defn run-tasks!
+  "Execute a task list as plain EDN data — used by subagents and plan amendments.
+  tasks is a map of {task-name {:doc … :depends […] …}} — same shape as bb.edn :tasks.
+  Does NOT write bb.edn. Returns a map of {task-name result}."
+  [{:keys [tasks session-trace tools-dir api-key emit!] :as opts}]
+  (reduce
+    (fn [results [task-name task]]
+      (let [result (react-step! (assoc opts
+                                  :task-doc (:doc task (name task-name))
+                                  :session-trace session-trace))]
+        (assoc results task-name result)))
+    {}
+    tasks))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1269,7 +1295,9 @@ git commit -m "feat: seed tool library with fetch-url and write-file"
 - `emit!` — `(fn [event-map] …)`, passed as `:emit!` in react-step! opts; nil-safe with `(when emit! …)`; no `:out-ch` anywhere ✓
 - `session-trace` — `(atom [])` in core.clj; passed as `@session-trace` (dereffed) to react-step! and planner/plan! ✓
 - `:file-context` events — prepended before `:user-input` by `load-file-contexts!` in core.clj; included by `select-events :think` and `:plan`; truncated at 8 000 chars in `render-event` ✓
+- `:plan-amend` events — emitted before any bb.edn rewrite; included by `select-events :think`; rendered with reason + old/new task lists ✓
 - `parse-at-paths` — private fn, tested via `#'botashka.core/parse-at-paths`; returns `[paths cleaned-input]` ✓
+- `run-tasks!` — in react.clj; executes in-memory EDN task map without writing bb.edn; used by subagents and plan amendments ✓
 - `react-step!` opts — `{:task-doc :session-trace :tools-dir :api-key :emit! :max-retries}` — consistent from Task 7 onward ✓
 - `format-event` — pure fn, tested in Task 8, used only by `emit!` in core.clj ✓
 - `run-tool` — defined in core.clj (Task 8), referenced in bb.edn `:init` ✓
