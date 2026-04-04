@@ -224,44 +224,58 @@ The preferred v2 UI path is **nREPL**, not a custom TUI. When Babashka runs `bb 
 - **Custom TUI becomes a thin nREPL client.** It connects to the nREPL server and renders `:out` messages. No custom protocol, no channel plumbing at the UI layer.
 - **Any nREPL client is a valid Botashka UI** — the protocol is already defined.
 
+### nREPL streaming is built in — no extensions needed
+
+nREPL's protocol is inherently message-based and async. During a single `eval` request, the server sends multiple response messages as they are produced:
+
+| Message | When sent |
+|---|---|
+| `{:out "…"}` | One per `println`/`flush` — delivered immediately |
+| `{:err "…"}` | stderr |
+| `{:value "…"}` | Final return value |
+| `{:status "done"}` | Completion sentinel |
+
+For Botashka: each `(emit! event)` → `(println …)` → one `:out` message pushed to the client in real time. For token-level LLM streaming, each `(print token)(flush)` → one `:out` message per token. **No protocol extensions, custom middleware, or new ops required.**
+
+nREPL 1.3 (August 2024) specifically improves this path:
+- Custom async executors — the `future`-based SSE reader integrates cleanly with nREPL's executor model
+- Improved session/dynamic bindings — `binding [*out*]` from non-eval threads (e.g. `future`) is reliably captured
+- Built-in client prints all output — confirms `:out` stream is stable from any thread
+
 ### The emit! migration path
 
-V1 `emit!` prints directly:
+V1 `emit!` prints directly — already works as nREPL `:out` automatically when running under `bb nrepl-server`:
 
 ```clojure
+;; V1 — works as-is under nREPL; println → :out message automatically
 (defn emit! [event]
-  (println (format-event event)))  ; → nREPL :out message automatically
+  (println (format-event event)))
 ```
 
-V2 `emit!` dispatches explicitly to the nREPL session's transport — enabling push to multiple connected clients and finer-grained message types:
+V2 `emit!` swaps the body for explicit session dispatch — zero other changes in the codebase:
 
 ```clojure
+;; V2 — explicit nREPL session dispatch
 (defn emit! [event]
   (nrepl.transport/send *session* {:op "out" :out (format-event event)}))
 ```
 
-The rest of the codebase does not change. `react-step!`, `planner`, and `tools` all call `emit!` — they are unaware of the transport.
-
-### Streaming via nREPL
-
-nREPL `:out` messages are sent per `println`/`flush` call. For token-by-token LLM streaming, each token triggers a separate `:out` message — this is fine for TUI rendering. The challenge is that SSE reading happens on a `future` thread, not the nREPL eval thread.
-
-**Solution:** Bind `*out*` in the `future` to the nREPL session's output stream using `nrepl.middleware.session/session-out`. This redirects all `print`/`println` calls from the streaming thread onto the correct nREPL session automatically:
+For token streaming in v2, bind `*out*` in the `future` to the nREPL session's output stream — nREPL 1.3 handles this reliably:
 
 ```clojure
 (future
   (binding [*out* (nrepl.middleware.session/session-out :out session)]
     (doseq [token (sse-token-seq response)]
       (print token)
-      (flush))))  ; each flush → nREPL :out message to client
+      (flush))))  ; each flush → :out message to nREPL client
 ```
 
 ### UI Roadmap
 
 | Version | Interface | How |
 |---|---|---|
-| V1 | `bb repl` — `start!` read-line loop | Already done — zero extra code |
-| V2 | nREPL server — any nREPL client | Start `bb nrepl-server`, swap `emit!` body |
+| V1 | `bb repl` — `start!` read-line loop | Zero extra code — `emit!` prints to stdout |
+| V2 | `bb nrepl-server` — any nREPL client | Swap `emit!` body; token streaming via `binding [*out*]` |
 | V3 | Custom TUI | Thin nREPL client that renders `:out` messages |
 | V4 | Telegram / WeChat | Adapter that bridges nREPL `:out` to bot API |
 
