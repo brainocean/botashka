@@ -33,90 +33,13 @@ Botashka is a local, general-purpose agentic assistant — a Clojure-native alte
 3. **LLM** — Claude claude-sonnet-4-5 via Anthropic API. Used for planning decomposition and ReAct reasoning.
 4. **Tool Library + Executor** — `tools/*.clj` files with `tools/tool-index.edn`, executed in Babashka/SCI. JVM `clojure -M` available as escape hatch when SCI limits are hit.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  HUMAN / REPL                                                   │
-│                                                                 │
-│   bb repl ──► start! ──► read-line loop                        │
-│                │                    ▲                           │
-│                │ goal text          │ emit! (format-event)      │
-│                ▼                    │                           │
-├────────────────┼────────────────────┼────────────────────────── │
-│  AGENT CORE   │                    │                           │
-│               ▼                    │                           │
-│         ┌──────────┐               │                           │
-│         │ Planner  │──► bb.edn     │                           │
-│         └────┬─────┘   (tasks)     │                           │
-│              │                     │                           │
-│              ▼                     │                           │
-│       ┌─────────────┐              │                           │
-│       │  ReAct Loop │──────────────┘                           │
-│       │  react-step!│                                          │
-│       └──────┬──────┘                                          │
-│              │                                                  │
-│         ┌────▼─────┐                                           │
-│         │  Spec    │  (validate before execute)                │
-│         │Validator │                                           │
-│         └────┬─────┘                                           │
-├──────────────┼──────────────────────────────────────────────── │
-│  TOOL LIBRARY + EXECUTOR                                        │
-│              │                                                  │
-│         ┌────▼──────────────────┐                              │
-│         │  bb eval  tools/*.clj │◄── tool-index.edn            │
-│         │  (SCI subprocess)     │                              │
-│         └────┬──────────────────┘                              │
-│              │ SCI limit?                                       │
-│              └──► clojure -M (JVM escape hatch)                │
-├─────────────────────────────────────────────────────────────── │
-│  LLM  (Anthropic API)                                           │
-│                                                                 │
-│   POST /v1/messages  ◄──────────────────────────────────────── │
-│   SSE token stream   ──────────────────────────────────────►   │
-└─────────────────────────────────────────────────────────────────┘
-```
 
 ---
 
 ## Planning Layer
 
-The agent uses `bb.edn` as its live, human-readable plan. When given a goal:
+The agent uses `bb.edn` as its live, human-readable plan. When given a goal, the planner LLM decomposes it into ordered steps and writes them as `:tasks` entries. `run-goal!` iterates tasks, calling `react-step!` for each, and writes back `:status` (display only) after each transition.
 
-```
-  "fetch SAP notes and save to CSV"
-              │
-              ▼
-       ┌─────────────┐
-       │   Planner   │  LLM decomposes goal
-       │  planner.clj│  into ordered steps
-       └──────┬──────┘
-              │  EDN tasks map
-              ▼
-  ┌───────────────────────────┐
-  │  bb.edn  :tasks           │  human-editable
-  │                           │  ◄── human can edit here
-  │  fetch-notes  :open       │
-  │  extract-ids  :open       │
-  │  save-csv     :open       │
-  └───────────┬───────────────┘
-              │  run-goal! iterates tasks
-              ▼
-  ┌─────────────────────────────────────────────────┐
-  │  for each task  →  react-step!                  │
-  │                                                 │
-  │  fetch-notes ──► :in-progress ──► :finished     │
-  │  extract-ids ──► :in-progress ──► :finished     │
-  │  save-csv    ──► :in-progress ──► :finished     │
-  └─────────────────────────────────────────────────┘
-              │  update-bb-edn-status! after each step
-              ▼
-  ┌───────────────────────────┐
-  │  bb.edn  :tasks           │  status written for human display
-  │                           │  (display only — trace is authoritative)
-  │  fetch-notes  :finished   │
-  │  extract-ids  :finished   │
-  │  save-csv     :finished   │
-  └───────────────────────────┘
-```
 2. Agent writes these as `:tasks` entries into `bb.edn` (pure EDN write — no special API needed)
 3. Human can inspect and edit `bb.edn` before or during execution
 4. Agent executes each task via `(babashka.tasks/run 'task-name)` — Babashka handles dependency ordering automatically
@@ -192,30 +115,6 @@ The parent agent writes bb.edn (human-visible, editable). Subagents carry their 
 
 Babashka's task runner has no built-in status — it runs a task or it doesn't. Botashka adds status as a **derived property of session-trace**, not a stored field:
 
-```
-                    ┌─────────┐
-                    │  :open  │  no events for this task yet
-                    └────┬────┘
-                         │ :think or :execute seen
-                         ▼
-                  ┌─────────────┐
-                  │ :in-progress│
-                  └──────┬──────┘
-                         │
-              ┌──────────┴──────────┐
-              │                     │
-              ▼                     ▼
-        ┌──────────┐          ┌─────────┐
-        │:finished │          │ :error  │
-        │          │          │         │
-        │:observe  │          │ :error  │
-        │  seen    │          │  seen   │
-        └──────────┘          └─────────┘
-
-  task-status is a pure fn of session-trace — cannot be out of sync.
-  :status in bb.edn is derived from trace on each update (display only).
-```
-
 ```clojure
 (defn task-status [session-trace task-name]
   (let [events (filter #(= (:task %) (name task-name)) session-trace)]
@@ -259,46 +158,6 @@ The trace is authoritative. The `:status` field in bb.edn is a convenience for h
 ## ReAct Loop
 
 Each `bt/run` call triggers the ReAct loop for that task step. The loop has **4 steps**:
-
-```
-  session-trace + tool-index
-          │
-          ▼
-  ┌───────────────┐
-  │   1. THINK    │  LLM decides:
-  │               │
-  │  ┌─────────┐  │   ┌───────────┐   ┌───────────┐
-  │  │  Reuse  │  │   │ Generate  │   │  Compose  │
-  │  └────┬────┘  │   └─────┬─────┘   └─────┬─────┘
-  └───────┼───────┘         └───────┬─────────┘
-          │                         │
-          │                         ▼
-          │               ┌──────────────────┐
-          │               │  2. GENERATE     │  LLM writes .clj
-          │               │  + VALIDATE      │
-          │               │                  │
-          │               │  spec/conform ──►│──► fail → retry (max 3×)
-          │               │        │         │         └──► ask human
-          │               │        ▼ pass    │
-          │               │  save tools/*.clj│
-          │               │  update index    │
-          │               └────────┬─────────┘
-          │                        │
-          └────────────────────────┘
-                                   │
-                                   ▼
-                         ┌──────────────────┐
-                         │   3. EXECUTE     │  bb -f tools/<name>.clj
-                         │                  │  stdout/stderr captured
-                         │                  │  SCI limit? → clojure -M
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │   4. OBSERVE     │  result → session-trace
-                         │                  │  loop continues or done
-                         └──────────────────┘
-```
 
 1. **THINK** — LLM receives: task context + `tools/tool-index.edn` (all tool descriptions) + conversation history. Outputs: reasoning + one of three decisions:
 
@@ -363,36 +222,6 @@ Each tool is a single `.clj` file in `tools/`:
 The LLM always receives `tool-index.edn` in its context. After generating a new tool, the agent appends its entry to the index before saving the `.clj` file.
 
 ### Tool lifecycle
-
-```
-  LLM decides :generate/:compose
-          │
-          ▼
-  ┌───────────────┐    fail (max 3×)    ┌──────────────┐
-  │  GENERATE     │──────────────────►  │  ask human   │
-  │  .clj source  │                     └──────────────┘
-  └───────┬───────┘
-          │ pass
-          ▼
-  spec/conform (isolated SCI ctx)
-          │
-          ▼
-  save tools/<name>.clj
-  append tool-index.edn
-          │
-          ▼
-  ┌───────────────────────────────────────┐
-  │  tool-index.edn                       │
-  │  {:fetch-url  {:description "…"       │  ◄── LLM reads this
-  │               :spec-in  "…"           │       on every :think call
-  │               :spec-out "…"}          │
-  │   :parse-title {…}  ← newly added     │
-  │   …}                                  │
-  └───────────────────────────────────────┘
-          │
-          ▼  next session
-  git commit tools/  ──► tool promoted, survives forever
-```
 
 - **Create** — generated by LLM, validated by spec, saved to `tools/`
 - **Reuse** — LLM selects from index by reading descriptions; no embedding/search needed
@@ -467,28 +296,7 @@ Built-ins are trusted infrastructure available in every session without generati
 
 The `:confirm true` flag in the index is the signal. The executor checks it before dispatch and calls `emit! {:type :ask …}` to prompt the human. If denied, the agent receives `:status :denied` as the observation and must decide how to proceed.
 
-**Executor dispatch:**
-
-```
-THINK decides :reuse → :shell (or any built-in)
-        │
-        ▼
-executor sees :builtin true
-        │
-        ├── :confirm true?
-        │       │
-        │       ▼
-        │   emit! {:type :ask :text "Run shell: rm -rf /tmp/foo? [y/n]"}
-        │   await human response
-        │       │ denied → {:status :denied}
-        │       │ approved ↓
-        │
-        ▼
-direct fn call (no subprocess, no spec validation)
-        │
-        ▼
-{:status :ok :result "…stdout…"}  →  append :observe to session-trace
-```
+**Executor dispatch:** the executor checks `:builtin true` and, for `:confirm true` tools, emits `:ask` and awaits `y/n` before dispatching the direct fn call. Denied → `{:status :denied}` returned as observation. Approved → direct fn call, result appended to session-trace as `:observe`.
 
 ---
 
@@ -521,51 +329,7 @@ All agent output goes through a single `emit!` function in `core.clj`. This is t
 
 ## Session Trace
 
-`session-trace` is the core runtime data structure — an append-only sequence of typed event maps representing everything that happened in a session.
-
-```
-  User input: "refactor @src/foo.clj to add a spec"
-        │
-        ▼
-  parse-at-paths ──► load file ──► append :file-context
-        │
-        ▼
-  append :user-input
-        │
-        ▼
-  ┌─────────────────────────────────────────────────────┐
-  │  session-trace  (append-only vector, atom)          │
-  │                                                     │
-  │  [:file-context]  ← file contents (truncated 8k)   │
-  │  [:user-input  ]  ← goal text                      │
-  │  [:plan        ]  ← tasks from planner             │
-  │  [:think       ]  ← LLM decision                   │
-  │  [:reuse       ]  ← tool selected                  │
-  │  [:generate    ]  ← new tool name                  │
-  │  [:validate    ]  ← spec result                    │
-  │  [:execute     ]  ← tool + args                    │
-  │  [:observe     ]  ← result (truncated 4k)          │
-  │  [:plan-amend  ]  ← reason + old/new tasks         │
-  │  [:assistant-out] ← final answer                   │
-  └──────────────────────────┬──────────────────────────┘
-                             │
-              ┌──────────────┼───────────────┐
-              │              │               │
-              ▼              ▼               ▼
-       llm-context      task-status     persist!
-       (select+render)  (pure fn)       (EDN file)
-              │
-    ┌─────────┴──────────┐
-    │                    │
-    ▼                    ▼
-  :plan call          :think call        :generate call
-  ─────────────       ──────────────     ──────────────
-  file-context        file-context       last :think
-  user-input          user-input         only
-                      plan
-                      plan-amend
-                      last :observe
-```
+`session-trace` is the core runtime data structure — an append-only sequence of typed event maps representing everything that happened in a session. It serves three consumers: `llm-context` (select + render per call type), `task-status` (pure fn derivation), and `persist!` (EDN file at session end).
 
 ```clojure
 ;; session-trace: a vector of typed event maps (append-only)
@@ -637,51 +401,7 @@ Because file contents can be large, the **truncate** step in the context pipelin
 
 ## LLM Context Assembly
 
-`llm-context` is a pure function that assembles the full API payload for a given LLM call — system prompt plus the relevant slice of `session-trace` rendered as messages.
-
-```
-  session-trace (full)          event-type
-        │                           │
-        └──────────┬────────────────┘
-                   │
-                   ▼
-           ┌──────────────┐
-           │ select-events│  filter by event-type rule:
-           │  (defmulti)  │
-           └──────┬───────┘
-                  │
-       ┌──────────┼──────────────────┐
-       │          │                  │
-    :plan      :think            :generate
-       │          │                  │
-  file-ctx    file-ctx          last :think
-  user-input  user-input        only
-              plan
-              plan-amend
-              last :observe
-              + tool-index
-              (filesystem)
-       │          │                  │
-       └──────────┼──────────────────┘
-                  │
-                  ▼
-           ┌──────────────┐
-           │   truncate   │  :file-context → 8 000 chars
-           │              │  :observe      → 4 000 chars
-           └──────┬───────┘
-                  │
-                  ▼
-           ┌──────────────┐
-           │ render-trace │  defmulti render-event per type
-           │              │  → joined string
-           └──────┬───────┘
-                  │
-                  ▼
-           ┌──────────────────────────────┐
-           │  {:system  (system-prompt t) │  → Anthropic API
-           │   :messages rendered-string} │    POST /v1/messages
-           └──────────────────────────────┘
-```
+`llm-context` is a pure function that assembles the full API payload for a given LLM call — system prompt plus the relevant slice of `session-trace` rendered as messages. The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (cap each `:file-context` entry at 8 000 chars; cap `:observe` results at 4 000 chars) → **render** (format as string). No embedding, no vector search.
 
 ```clojure
 ;; botashka/llm_context.clj
@@ -709,8 +429,6 @@ Each event type routes to its own pipeline:
 | `:plan` | Planner instructions | file-context + user-input only |
 | `:think` | ReAct THINK instructions | file-context + user-input + plan + plan-amend history + last `:observe` + tool-index (read from filesystem, appended as final message) |
 | `:generate` | Code generation instructions | last `:think` decision only |
-
-The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (cap each `:file-context` entry at 8 000 chars; cap `:observe` results at 4 000 chars) → **render** (format as string). No embedding, no vector search.
 
 ---
 
@@ -774,24 +492,6 @@ The preferred v2 UI path is **nREPL**, not a custom TUI. When Babashka runs `bb 
 - **Custom TUI becomes a thin nREPL client.** It evaluates `(b/start!)` and renders the `:out` stream. No custom protocol needed.
 
 > **V2 scope is intentionally narrow:** swap `emit!` to print within a long-lived nREPL `eval` op. Multi-client broadcast or push-to-arbitrary-session are V3 concerns if they arise.
-
-```
-  V1                                V2 / V3
-  ──────────────────────            ──────────────────────────────────────
-                                                     ┌──────────────────┐
-  bb repl                           bb nrepl-server  │  CIDER / Calva   │
-     │                                    │          │  vim-iced        │
-     │  (b/start!)                        │          │  custom TUI      │
-     ▼                                    │          │  Telegram bot    │
-  start!                                  │          └────────┬─────────┘
-     │                                    │                   │ nREPL tcp
-     ▼                                    ▼                   │
-  emit! ──► println ──► stdout     emit! ──► println   ◄──── :out msgs
-                                    (within eval op — eval-scoped)
-
-  ─── only emit! body changes between V1 and V2 ───
-  ─── agent core, react-step!, planner unchanged  ───
-```
 
 ### nREPL streaming is built in — no extensions needed
 
