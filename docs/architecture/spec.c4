@@ -1,0 +1,19 @@
+specification {
+  element actor
+  element system
+  element container
+  element component
+  element database
+
+  relationship uses
+  relationship calls
+  relationship reads
+  relationship writes
+  relationship generates
+  relationship validates
+  relationship executes
+  relationship emits
+
+  tag external
+  tag internal
+}

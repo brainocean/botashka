@@ -1,0 +1,115 @@
+views {
+
+  // ── Level 1: System Landscape ────────────────────────────────────────────
+
+  view index {
+    title 'Botashka — System Landscape'
+    include *
+    style developer {
+      color sky
+    }
+  }
+
+  // ── Level 2: System Context ───────────────────────────────────────────────
+
+  view context of botashka {
+    title 'Botashka — System Context'
+    include botashka
+    include developer
+    include anthropic
+    include nreplClient
+    include developer -> botashka
+    include botashka -> anthropic
+    include nreplClient -> botashka
+  }
+
+  // ── Level 3: Containers ───────────────────────────────────────────────────
+
+  view containers of botashka {
+    title 'Botashka — Containers'
+    include botashka.*
+    include developer -> botashka.repl
+    include anthropic
+    include nreplClient -> botashka.repl
+    include botashka.llmClient -> anthropic
+
+    style botashka.sessionTrace {
+      color secondary
+    }
+  }
+
+  // ── Agent Core detail ────────────────────────────────────────────────────
+
+  view agentCore {
+    title 'Botashka — Agent Core (ReAct + Context)'
+    include botashka.core
+    include botashka.planner
+    include botashka.react
+    include botashka.llmContext
+    include botashka.specValidator
+    include botashka.llmClient
+    include botashka.sessionTrace
+    include botashka.toolLibrary
+    include botashka.executor
+    include anthropic
+
+    include botashka.core -> botashka.planner
+    include botashka.core -> botashka.react
+    include botashka.core -> botashka.sessionTrace
+    include botashka.planner -> botashka.llmContext
+    include botashka.planner -> botashka.llmClient
+    include botashka.planner -> botashka.sessionTrace
+    include botashka.react -> botashka.llmContext
+    include botashka.react -> botashka.llmClient
+    include botashka.react -> botashka.specValidator
+    include botashka.react -> botashka.toolLibrary
+    include botashka.react -> botashka.executor
+    include botashka.react -> botashka.sessionTrace
+    include botashka.llmContext -> botashka.sessionTrace
+    include botashka.specValidator -> botashka.toolLibrary
+    include botashka.executor -> botashka.toolLibrary
+    include botashka.llmClient -> anthropic
+  }
+
+  // ── Dynamic: ReAct Loop (one task step) ──────────────────────────────────
+
+  dynamic view reactLoop {
+    title 'Botashka — ReAct Loop (one task step)'
+
+    botashka.core -> botashka.react 'react-step!(task-doc, session-trace)'
+    botashka.react -> botashka.llmContext 'llm-context(trace, :think)'
+    botashka.llmContext -> botashka.sessionTrace 'select-events :think'
+    botashka.react -> botashka.llmClient 'complete(think-payload)'
+    botashka.llmClient -> anthropic 'POST /v1/messages'
+    anthropic -> botashka.llmClient 'SSE token stream'
+    botashka.react -> botashka.specValidator 'validate-tool-source(code)'
+    botashka.specValidator -> botashka.toolLibrary 'isolated SCI eval'
+    botashka.react -> botashka.toolLibrary 'save-tool! + update index'
+    botashka.react -> botashka.executor 'execute-tool(code, args)'
+    botashka.executor -> botashka.toolLibrary 'bb eval subprocess'
+    botashka.react -> botashka.sessionTrace 'append :observe(result)'
+    botashka.react -> botashka.core 'return result'
+    botashka.core -> botashka.repl 'emit!(answer)'
+  }
+
+  // ── Dynamic: Goal → Plan → Execute ───────────────────────────────────────
+
+  dynamic view planningFlow {
+    title 'Botashka — Goal to Execution Flow'
+
+    developer -> botashka.repl 'types goal + @file refs'
+    botashka.repl -> botashka.core 'start! read-line'
+    botashka.core -> botashka.sessionTrace 'append :file-context + :user-input'
+    botashka.core -> botashka.planner 'plan!(goal, api-key, session-trace)'
+    botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
+    botashka.planner -> botashka.llmClient 'complete(plan-payload)'
+    botashka.llmClient -> anthropic 'POST /v1/messages'
+    anthropic -> botashka.llmClient 'EDN tasks map'
+    botashka.planner -> botashka.bbEdn 'write-plan!(tasks)'
+    botashka.planner -> botashka.core 'return tasks map'
+    botashka.core -> botashka.sessionTrace 'append :plan'
+    botashka.core -> botashka.react 'react-step! per task'
+    botashka.core -> botashka.bbEdn 'update-bb-edn-status!'
+    botashka.core -> botashka.repl 'emit!(answer)'
+  }
+}

@@ -1,0 +1,154 @@
+model {
+
+  actor developer 'Developer' {
+    description 'Local developer running Botashka in a Babashka REPL'
+  }
+
+  system botashka 'Botashka' {
+    description 'Local Clojure-native agentic assistant. Uses generated code snippets as its action space (CodeAct style). Self-growing tool library, hybrid plan+ReAct loop.'
+    technology 'Babashka / SCI / Clojure'
+
+    container repl 'REPL Interface' {
+      description 'V1: bb repl + start! read-line loop. V2: bb nrepl-server — any nREPL client connects and receives output as :out messages.'
+      technology 'Babashka REPL / nREPL'
+      style {
+        shape browser
+        color sky
+      }
+    }
+
+    container core 'core.clj' {
+      description 'start! loop, emit! output seam, format-event, run-tool helper, session-trace atom, task-status pure fn, @path file context parsing.'
+      technology 'Clojure / Babashka'
+      style {
+        color primary
+      }
+    }
+
+    container planner 'planner.clj' {
+      description 'Decomposes user goal into ordered steps via LLM. Writes :tasks into bb.edn. Emits :plan-amend events on mid-execution rewrites.'
+      technology 'Clojure / Babashka'
+      style {
+        color green
+      }
+    }
+
+    container react 'react.clj' {
+      description 'ReAct loop: THINK → GENERATE+VALIDATE → EXECUTE → OBSERVE. run-tasks! executes in-memory EDN task maps for subagents.'
+      technology 'Clojure / Babashka'
+      style {
+        color green
+      }
+    }
+
+    container llmContext 'llm_context.clj' {
+      description 'Pure context assembly. select-events filters session-trace per LLM call type. truncate-content caps large payloads. render-trace formats events. system-prompt constants per call type.'
+      technology 'Clojure / Babashka'
+      style {
+        color amber
+      }
+    }
+
+    container specValidator 'spec.clj' {
+      description 'Validates generated tool source in an isolated SCI context before execution. Any generated code must pass before it can run.'
+      technology 'Clojure / SCI / clojure.spec.alpha'
+      style {
+        color red
+      }
+    }
+
+    container llmClient 'llm.clj' {
+      description 'Claude API client. Non-streaming complete (v1) wrapping SSE stream. stream-chat stubbed for v2 token streaming.'
+      technology 'Clojure / babashka.http-client / SSE'
+      style {
+        color slate
+      }
+    }
+
+    container sessionTrace 'session-trace' {
+      description 'Append-only vector of typed event maps. Single source of truth for replay, debug, context assembly, and task-status derivation. Persisted to sessions/*.edn at session end.'
+      technology 'Clojure atom (in-memory) + EDN (on-disk)'
+      style {
+        shape cylinder
+        color secondary
+      }
+    }
+
+    container bbEdn 'bb.edn' {
+      description 'Live human-readable plan. Agent writes :tasks here. Human can inspect and edit at any time. :status field written for display only — trace is authoritative.'
+      technology 'EDN / Babashka tasks'
+      style {
+        shape storage
+        color sky
+      }
+    }
+
+    container toolLibrary 'Tool Library' {
+      description 'Self-growing library of generated Clojure snippets. Each tool: ns form + clojure.spec defs + single defn. Promoted across sessions via git commit.'
+      technology 'Clojure .clj files + tool-index.edn'
+      style {
+        shape cylinder
+        color green
+      }
+    }
+
+    container executor 'Executor' {
+      description 'Runs tool source via bb eval subprocess (SCI). Falls back to clojure -M JVM subprocess when SCI limits are hit. Captures stdout/stderr as observation.'
+      technology 'Babashka subprocess / clojure -M'
+      style {
+        color muted
+      }
+    }
+  }
+
+  system anthropic 'Anthropic API' {
+    #external
+    description 'Claude claude-sonnet-4-5. Used for planning decomposition (:plan), ReAct reasoning (:think), and code generation (:generate).'
+    technology 'HTTPS / SSE'
+    style {
+      color amber
+    }
+  }
+
+  system nreplClient 'nREPL Client' {
+    #external
+    description 'V2/V3: any nREPL client — CIDER, Calva, vim-iced, custom TUI, Telegram bot. Connects to bb nrepl-server, receives :out messages.'
+    technology 'nREPL protocol'
+    style {
+      shape browser
+      color muted
+    }
+  }
+
+  // --- Relationships ---
+
+  developer -> botashka.repl 'types goal / @file refs'
+  botashka.repl -> botashka.core 'calls start!'
+
+  botashka.core -> botashka.planner 'plan!(goal, session-trace)'
+  botashka.core -> botashka.react 'react-step!(task, session-trace)'
+  botashka.core -> botashka.sessionTrace 'append-event! / deref'
+  botashka.core -> botashka.bbEdn 'update-bb-edn-status!'
+  botashka.core -> botashka.repl 'emit!(event)'
+
+  botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
+  botashka.planner -> botashka.llmClient 'complete(messages, api-key)'
+  botashka.planner -> botashka.bbEdn 'write-plan!(tasks)'
+  botashka.planner -> botashka.sessionTrace 'reads trace'
+
+  botashka.react -> botashka.llmContext 'llm-context(trace, :think/:generate)'
+  botashka.react -> botashka.llmClient 'complete(messages, api-key)'
+  botashka.react -> botashka.specValidator 'validate-tool-source(code)'
+  botashka.react -> botashka.toolLibrary 'load/save tool + index'
+  botashka.react -> botashka.executor 'execute-tool(code, args)'
+  botashka.react -> botashka.sessionTrace 'reads trace'
+
+  botashka.llmContext -> botashka.sessionTrace 'select-events + render-trace'
+
+  botashka.specValidator -> botashka.toolLibrary 'isolated SCI eval'
+  botashka.executor -> botashka.toolLibrary 'bb eval subprocess'
+
+  botashka.llmClient -> anthropic 'POST /v1/messages (SSE)'
+
+  nreplClient -> botashka.repl 'nREPL :eval — V2+'
+}
