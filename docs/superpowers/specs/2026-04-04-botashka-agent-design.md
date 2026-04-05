@@ -383,6 +383,97 @@ The LLM always receives `tool-index.edn` in its context. After generating a new 
 - **Promote** — tool survives across sessions by being committed to git
 - **Deprecate** — entry removed from `tool-index.edn` (file kept for reference)
 
+### Built-in Tools
+
+Built-ins are trusted infrastructure available in every session without generation or spec validation. They live in `tool-index.edn` alongside generated tools, marked `:builtin true`. THINK can select them like any other tool; the executor dispatches them directly to Clojure functions in `core.clj` / `llm.clj` instead of spawning a `bb eval` subprocess.
+
+```clojure
+;; tool-index.edn — built-ins listed alongside generated tools
+{;; ── I/O ──────────────────────────────────────────────────────
+ :read-file    {:builtin     true
+                :description "Read a file at path, return content string"
+                :spec-in     "string? (path)"
+                :spec-out    "string? (content)"}
+ :write-file   {:builtin     true
+                :description "Write content string to a file at path, return path"
+                :spec-in     "map with :path (string) and :content (string)"
+                :spec-out    "string? (path written)"}
+ :list-dir     {:builtin     true
+                :description "List files in a directory, return seq of path strings"
+                :spec-in     "string? (directory path)"
+                :spec-out    "seq of strings"}
+ :shell        {:builtin     true
+                :confirm     true
+                :description "Run a shell command, return {:stdout :stderr :exit}"
+                :spec-in     "string? (shell command)"
+                :spec-out    "map with :stdout :stderr :exit"}
+
+ ;; ── Trace ─────────────────────────────────────────────────────
+ :session-trace {:builtin     true
+                 :description "Return the current session-trace as an EDN string"
+                 :spec-in     "nil"
+                 :spec-out    "string? (EDN)"}
+ :task-status  {:builtin     true
+                :description "Return the status of a named task (:open/:in-progress/:finished/:error)"
+                :spec-in     "string? (task name)"
+                :spec-out    "keyword?"}
+
+ ;; ── Tool Library ──────────────────────────────────────────────
+ :tool-index   {:builtin     true
+                :description "Return the full tool-index.edn as a string"
+                :spec-in     "nil"
+                :spec-out    "string? (EDN)"}
+ :save-tool    {:builtin     true
+                :description "Save a named tool (code + meta) to the library"
+                :spec-in     "map with :name :code :description :spec-in :spec-out"
+                :spec-out    "string? (path saved)"}
+
+ ;; ── LLM ───────────────────────────────────────────────────────
+ :llm-complete {:builtin     true
+                :confirm     true
+                :description "Call Claude with {:system :messages}, return response string"
+                :spec-in     "map with :system (string) and :messages (string)"
+                :spec-out    "string? (LLM response)"}
+
+ ;; ── Generated tools added below ───────────────────────────────
+ :fetch-url    {:description "Fetch the body of an HTTP URL as a string"
+                :spec-in     "string? (valid URL)"
+                :spec-out    "string? (response body)"}}
+```
+
+**Confirmation policy** — two built-ins require explicit human approval before the agent can invoke them:
+
+| Built-in | Risk | Confirmation |
+|---|---|---|
+| `:shell` | Arbitrary shell execution — destructive, irreversible | Yes — show command, await `y/n` |
+| `:llm-complete` | Incurs API cost; may leak context to external service | Yes — show payload size, await `y/n` |
+| All others | Read-only or local writes | No |
+
+The `:confirm true` flag in the index is the signal. The executor checks it before dispatch and calls `emit! {:type :ask …}` to prompt the human. If denied, the agent receives `:status :denied` as the observation and must decide how to proceed.
+
+**Executor dispatch:**
+
+```
+THINK decides :reuse → :shell (or any built-in)
+        │
+        ▼
+executor sees :builtin true
+        │
+        ├── :confirm true?
+        │       │
+        │       ▼
+        │   emit! {:type :ask :text "Run shell: rm -rf /tmp/foo? [y/n]"}
+        │   await human response
+        │       │ denied → {:status :denied}
+        │       │ approved ↓
+        │
+        ▼
+direct fn call (no subprocess, no spec validation)
+        │
+        ▼
+{:status :ok :result "…stdout…"}  →  append :observe to session-trace
+```
+
 ---
 
 ## Output Layer — emit!
@@ -604,11 +695,12 @@ botashka/
 │   ├── botashka/planner.clj      ← LLM → bb.edn task writer
 │   ├── botashka/react.clj        ← ReAct loop (think/generate/execute/observe)
 │   ├── botashka/tools.clj        ← tool lib management (load/save/list)
+│   ├── botashka/builtins.clj     ← built-in tool dispatch (read-file, shell, llm-complete, …)
 │   ├── botashka/spec.clj         ← spec validation helpers
 │   ├── botashka/llm.clj          ← Claude API client (non-streaming v1)
 │   └── botashka/llm_context.clj  ← context assembly — llm-context pure fn + filter pipelines
 └── tools/
-    ├── tool-index.edn            ← tool registry (name → description + specs)
+    ├── tool-index.edn            ← tool registry (built-ins + generated tools)
     ├── fetch-url.clj
     ├── write-file.clj
     └── ...
@@ -625,9 +717,10 @@ botashka/
 | Runtime | Babashka (SCI) | Fast startup, no JVM overhead, real Clojure |
 | JVM escalation | `clojure -M` subprocess | Escape hatch for SCI limits, explicit boundary |
 | Action space | Generated Clojure snippets | CodeAct: more expressive than JSON tool calls |
-| Tool selection | LLM reads index | Keeps decision in one place, no embedding overhead |
-| Validation | clojure.spec | Machine-checkable, instruments agent's own tools |
-| Planning substrate | bb.edn = human layer; in-memory EDN = execution layer | bb.edn is the human-editable window; subagents run from data, not files |
+| Tool types | Generated tools + built-in tools | Built-ins are trusted infrastructure (`:builtin true` in index); generated tools must pass spec validation; executor dispatches differently for each |
+| Confirmation policy | `:confirm true` on `:shell` and `:llm-complete` | High-risk built-ins require `y/n` before execution; others run freely |
+| Tool selection | LLM reads index (built-ins + generated) | Keeps decision in one place, no embedding overhead |
+| Validation | clojure.spec | Machine-checkable, instruments agent's own tools; built-ins are pre-trusted and bypass validation | bb.edn is the human-editable window; subagents run from data, not files |
 | Plan mutation | Allowed, but only via explicit `:plan-amend` event | Silent rewrites lose reasoning chain; `:plan-amend` makes history queryable |
 | Subagent task lists | In-memory EDN map passed to `react-step!` loop | No bb.edn needed; `--config` available as opt-in for human-inspectable subagents |
 | Task status | Derived from `session-trace` via `task-status` pure fn | Trace is authoritative; `:status` in bb.edn is display-only convenience |
