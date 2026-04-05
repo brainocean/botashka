@@ -9,7 +9,7 @@ model {
     technology 'Babashka / SCI / Clojure'
 
     container repl 'REPL Interface' {
-      description 'V1: bb repl + start! read-line loop. V2: bb nrepl-server — any nREPL client connects and receives output as :out messages.'
+      description 'V1: bb repl + start! read-line loop. V2: bb nrepl-server — any nREPL client connects and receives output as :out messages. Receives emit! output and :ask confirmation events.'
       technology 'Babashka REPL / nREPL'
       style {
         shape browser
@@ -18,7 +18,7 @@ model {
     }
 
     container core 'core.clj' {
-      description 'start! loop, emit! output seam, format-event, run-tool helper, session-trace atom, task-status pure fn, @path file context parsing.'
+      description 'start! loop, emit! output seam, format-event, run-tool helper, session-trace atom, task-status pure fn, @path file parsing. Reads filesystem for @path tokens. Derives task :status from trace before writing bb.edn.'
       technology 'Clojure / Babashka'
       style {
         color primary
@@ -26,7 +26,7 @@ model {
     }
 
     container planner 'planner.clj' {
-      description 'Decomposes user goal into ordered steps via LLM. Writes :tasks into bb.edn. Emits :plan-amend events on mid-execution rewrites.'
+      description 'Decomposes user goal into ordered steps via LLM. Writes :tasks into bb.edn. Appends :plan-amend event to session-trace before any mid-execution rewrite.'
       technology 'Clojure / Babashka'
       style {
         color green
@@ -34,7 +34,7 @@ model {
     }
 
     container react 'react.clj' {
-      description 'ReAct loop: THINK → GENERATE+VALIDATE → EXECUTE → OBSERVE. run-tasks! executes in-memory EDN task maps for subagents.'
+      description 'ReAct loop: THINK → GENERATE+VALIDATE → EXECUTE → OBSERVE. Dispatches to executor for generated tools or builtins for built-in tools. run-tasks! executes in-memory EDN task maps for subagents without writing bb.edn.'
       technology 'Clojure / Babashka'
       style {
         color green
@@ -42,7 +42,7 @@ model {
     }
 
     container llmContext 'llm_context.clj' {
-      description 'Pure context assembly. select-events filters session-trace per LLM call type. truncate-content caps large payloads. render-trace formats events. system-prompt constants per call type.'
+      description 'Pure context assembly. select-events filters session-trace per LLM call type (:plan/:think/:generate). truncate-content caps :file-context at 8k and :observe at 4k chars. render-trace formats events. system-prompt constants per call type. Returns {:system :messages} map.'
       technology 'Clojure / Babashka'
       style {
         color amber
@@ -50,7 +50,7 @@ model {
     }
 
     container specValidator 'spec.clj' {
-      description 'Validates generated tool source in an isolated SCI context before execution. Any generated code must pass before it can run.'
+      description 'Validates generated tool source in an isolated SCI context before execution. Checks: parseable, loads without error, defines at least one s/def or s/fdef. Generated tools only — built-ins bypass this gate.'
       technology 'Clojure / SCI / clojure.spec.alpha'
       style {
         color red
@@ -66,7 +66,7 @@ model {
     }
 
     container sessionTrace 'session-trace' {
-      description 'Append-only vector of typed event maps. Single source of truth for replay, debug, context assembly, and task-status derivation. Persisted to sessions/*.edn at session end.'
+      description 'Append-only vector of typed event maps: :file-context :user-input :plan :think :reuse :generate :validate :execute :observe :plan-amend :assistant-out :ask :error. Single source of truth for task-status, context assembly, and replay. Persisted to sessions/*.edn at session end.'
       technology 'Clojure atom (in-memory) + EDN (on-disk)'
       style {
         shape cylinder
@@ -75,7 +75,7 @@ model {
     }
 
     container bbEdn 'bb.edn' {
-      description 'Live human-readable plan. Agent writes :tasks here. Human can inspect and edit at any time. :status field written for display only — trace is authoritative.'
+      description 'Live human-readable plan. Planner writes :tasks here. Human can inspect and edit at any time. :status field derived from session-trace and written by core after each task step — display only, never read as ground truth.'
       technology 'EDN / Babashka tasks'
       style {
         shape storage
@@ -83,17 +83,25 @@ model {
       }
     }
 
-    container toolLibrary 'Tool Library' {
-      description 'Self-growing library of generated Clojure snippets. Each tool: ns form + clojure.spec defs + single defn. Promoted across sessions via git commit.'
-      technology 'Clojure .clj files + tool-index.edn'
+    container toolLibrary 'Tool Library + Index' {
+      description 'tool-index.edn: registry of all tools (built-ins with :builtin true + generated). LLM reads this index on every :think call to decide reuse/generate. tools/*.clj: generated Clojure snippets, each with ns form + clojure.spec defs + single defn. Promoted across sessions via git commit.'
+      technology 'tool-index.edn + Clojure .clj files'
       style {
         shape cylinder
         color green
       }
     }
 
+    container builtins 'builtins.clj' {
+      description 'Built-in tool dispatch — direct fn calls, no subprocess, no spec validation. Registry: read-file, write-file, list-dir, shell (:confirm true), session-trace, task-status, tool-index, save-tool, llm-complete (:confirm true). :confirm true tools emit :ask event and await human y/n before executing.'
+      technology 'Clojure / Babashka'
+      style {
+        color amber
+      }
+    }
+
     container executor 'Executor' {
-      description 'Runs tool source via bb eval subprocess (SCI). Falls back to clojure -M JVM subprocess when SCI limits are hit. Captures stdout/stderr as observation.'
+      description 'Routes execution: generated tools → bb eval subprocess (SCI, falls back to clojure -M). Built-in tools → builtins.clj direct fn dispatch. Checks :confirm true flag — emits :ask event and awaits human approval before proceeding. Returns {:status :stdout :stderr} to react.'
       technology 'Babashka subprocess / clojure -M'
       style {
         color muted
@@ -110,6 +118,16 @@ model {
     }
   }
 
+  system filesystem 'Local Filesystem' {
+    #external
+    description 'Local disk: source files read via @path syntax, tools/*.clj, tool-index.edn, bb.edn, sessions/*.edn persistence.'
+    technology 'POSIX filesystem'
+    style {
+      shape storage
+      color muted
+    }
+  }
+
   system nreplClient 'nREPL Client' {
     #external
     description 'V2/V3: any nREPL client — CIDER, Calva, vim-iced, custom TUI, Telegram bot. Connects to bb nrepl-server, receives :out messages.'
@@ -123,32 +141,46 @@ model {
   // --- Relationships ---
 
   developer -> botashka.repl 'types goal / @file refs'
+  developer -> botashka.repl 'approves/denies :ask confirmation'
   botashka.repl -> botashka.core 'calls start!'
 
+  botashka.core -[reads]-> filesystem '@path file reads'
+  botashka.core -> botashka.sessionTrace 'append-event! (reads + writes)'
   botashka.core -> botashka.planner 'plan!(goal, session-trace)'
   botashka.core -> botashka.react 'react-step!(task, session-trace)'
-  botashka.core -> botashka.sessionTrace 'append-event! / deref'
-  botashka.core -> botashka.bbEdn 'update-bb-edn-status!'
-  botashka.core -> botashka.repl 'emit!(event)'
+  botashka.core -[writes]-> botashka.bbEdn 'update-bb-edn-status! (derived from trace)'
+  botashka.core -[emits]-> botashka.repl 'emit!(event) including :ask for confirmations'
 
   botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
   botashka.planner -> botashka.llmClient 'complete(messages, api-key)'
-  botashka.planner -> botashka.bbEdn 'write-plan!(tasks)'
-  botashka.planner -> botashka.sessionTrace 'reads trace'
+  botashka.planner -[reads]-> botashka.sessionTrace 'context assembly input'
+  botashka.planner -[writes]-> botashka.sessionTrace 'append :plan-amend before rewrite'
+  botashka.planner -[writes]-> botashka.bbEdn 'write-plan!(tasks)'
 
   botashka.react -> botashka.llmContext 'llm-context(trace, :think/:generate)'
   botashka.react -> botashka.llmClient 'complete(messages, api-key)'
-  botashka.react -> botashka.specValidator 'validate-tool-source(code)'
-  botashka.react -> botashka.toolLibrary 'load/save tool + index'
-  botashka.react -> botashka.executor 'execute-tool(code, args)'
-  botashka.react -> botashka.sessionTrace 'reads trace'
+  botashka.react -[validates]-> botashka.specValidator 'validate-tool-source(generated code only)'
+  botashka.react -> botashka.toolLibrary 'read tool-index / save-tool!'
+  botashka.react -> botashka.executor 'execute-tool(code/name, args)'
+  botashka.react -[reads]-> botashka.sessionTrace 'context assembly input'
+  botashka.react -[writes]-> botashka.sessionTrace 'append :think/:generate/:validate/:execute/:observe'
 
-  botashka.llmContext -> botashka.sessionTrace 'select-events + render-trace'
+  botashka.llmContext -[reads]-> botashka.sessionTrace 'select-events + render-trace'
 
-  botashka.specValidator -> botashka.toolLibrary 'isolated SCI eval'
-  botashka.executor -> botashka.toolLibrary 'bb eval subprocess'
+  botashka.specValidator -[validates]-> botashka.toolLibrary 'isolated SCI eval (generated tools only)'
+  botashka.executor -[executes]-> botashka.toolLibrary 'bb eval subprocess (generated tools)'
+  botashka.executor -> botashka.builtins 'direct fn dispatch (built-in tools)'
+  botashka.executor -[emits]-> botashka.repl 'emit! :ask → await y/n (confirm true tools)'
 
-  botashka.llmClient -> anthropic 'POST /v1/messages (SSE)'
+  botashka.builtins -[reads]-> filesystem 'read-file, list-dir'
+  botashka.builtins -[writes]-> filesystem 'write-file, save-tool'
+  botashka.builtins -[reads]-> botashka.sessionTrace 'session-trace built-in'
+  botashka.builtins -> botashka.toolLibrary 'tool-index, save-tool built-ins'
+  botashka.builtins -[calls]-> botashka.llmClient 'llm-complete built-in'
+
+  botashka.llmClient -[calls]-> anthropic 'POST /v1/messages (SSE)'
+
+  botashka.sessionTrace -[writes]-> filesystem 'persist sessions/*.edn at session end'
 
   nreplClient -> botashka.repl 'nREPL :eval — V2+'
 }

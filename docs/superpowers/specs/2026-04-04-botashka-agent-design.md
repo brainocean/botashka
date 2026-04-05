@@ -547,7 +547,7 @@ All agent output goes through a single `emit!` function in `core.clj`. This is t
   file-context        file-context       last :think
   user-input          user-input         only
                       plan
-                      plan-amend*
+                      plan-amend
                       last :observe
 ```
 
@@ -630,8 +630,10 @@ Because file contents can be large, the **truncate** step in the context pipelin
   file-ctx    file-ctx          last :think
   user-input  user-input        only
               plan
-              plan-amend*
+              plan-amend
               last :observe
+              + tool-index
+              (filesystem)
        │          │                  │
        └──────────┼──────────────────┘
                   │
@@ -678,7 +680,7 @@ Each event type routes to its own pipeline:
 | LLM call | System prompt | Context selected from trace |
 |---|---|---|
 | `:plan` | Planner instructions | file-context + user-input only |
-| `:think` | ReAct THINK instructions | file-context + user-input + plan + plan-amend history + tool-index + last `:observe` |
+| `:think` | ReAct THINK instructions | file-context + user-input + plan + plan-amend history + last `:observe` + tool-index (read from filesystem, appended as final message) |
 | `:generate` | Code generation instructions | last `:think` decision only |
 
 The pipeline is: **select** (filter session-trace by relevant event types) → **truncate** (cap each `:file-context` entry at 8 000 chars; cap `:observe` results at 4 000 chars) → **render** (format as string). No embedding, no vector search.
@@ -720,7 +722,8 @@ botashka/
 | Tool types | Generated tools + built-in tools | Built-ins are trusted infrastructure (`:builtin true` in index); generated tools must pass spec validation; executor dispatches differently for each |
 | Confirmation policy | `:confirm true` on `:shell` and `:llm-complete` | High-risk built-ins require `y/n` before execution; others run freely |
 | Tool selection | LLM reads index (built-ins + generated) | Keeps decision in one place, no embedding overhead |
-| Validation | clojure.spec | Machine-checkable, instruments agent's own tools; built-ins are pre-trusted and bypass validation | bb.edn is the human-editable window; subagents run from data, not files |
+| Validation | clojure.spec | Machine-checkable, instruments agent's own tools; built-ins are pre-trusted and bypass validation |
+| Planning substrate | bb.edn is the human-editable window; subagents run from data, not files | Keeps human interaction layer separate from execution |
 | Plan mutation | Allowed, but only via explicit `:plan-amend` event | Silent rewrites lose reasoning chain; `:plan-amend` makes history queryable |
 | Subagent task lists | In-memory EDN map passed to `react-step!` loop | No bb.edn needed; `--config` available as opt-in for human-inspectable subagents |
 | Task status | Derived from `session-trace` via `task-status` pure fn | Trace is authoritative; `:status` in bb.edn is display-only convenience |

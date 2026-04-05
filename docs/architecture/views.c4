@@ -18,8 +18,10 @@ views {
     include developer
     include anthropic
     include nreplClient
+    include filesystem
     include developer -> botashka
     include botashka -> anthropic
+    include botashka -> filesystem
     include nreplClient -> botashka
   }
 
@@ -30,18 +32,25 @@ views {
     include botashka.*
     include developer -> botashka.repl
     include anthropic
+    include filesystem
     include nreplClient -> botashka.repl
     include botashka.llmClient -> anthropic
+    include botashka.core -> filesystem
+    include botashka.builtins -> filesystem
+    include botashka.sessionTrace -> filesystem
 
     style botashka.sessionTrace {
       color secondary
+    }
+    style botashka.builtins {
+      color amber
     }
   }
 
   // ── Agent Core detail ────────────────────────────────────────────────────
 
   view agentCore {
-    title 'Botashka — Agent Core (ReAct + Context)'
+    title 'Botashka — Agent Core (ReAct + Context + Built-ins)'
     include botashka.core
     include botashka.planner
     include botashka.react
@@ -51,6 +60,7 @@ views {
     include botashka.sessionTrace
     include botashka.toolLibrary
     include botashka.executor
+    include botashka.builtins
     include anthropic
 
     include botashka.core -> botashka.planner
@@ -68,28 +78,60 @@ views {
     include botashka.llmContext -> botashka.sessionTrace
     include botashka.specValidator -> botashka.toolLibrary
     include botashka.executor -> botashka.toolLibrary
+    include botashka.executor -> botashka.builtins
+    include botashka.builtins -> botashka.toolLibrary
+    include botashka.builtins -> botashka.sessionTrace
+    include botashka.builtins -> botashka.llmClient
     include botashka.llmClient -> anthropic
   }
 
-  // ── Dynamic: ReAct Loop (one task step) ──────────────────────────────────
+  // ── Dynamic: ReAct Loop (generated tool path) ────────────────────────────
 
   dynamic view reactLoop {
-    title 'Botashka — ReAct Loop (one task step)'
+    title 'Botashka — ReAct Loop: Generated Tool Path'
 
     botashka.core -> botashka.react 'react-step!(task-doc, session-trace)'
     botashka.react -> botashka.llmContext 'llm-context(trace, :think)'
     botashka.llmContext -> botashka.sessionTrace 'select-events :think'
     botashka.react -> botashka.llmClient 'complete(think-payload)'
     botashka.llmClient -> anthropic 'POST /v1/messages'
-    anthropic -> botashka.llmClient 'SSE token stream'
+    anthropic -> botashka.llmClient 'SSE: :generate decision'
+    botashka.react -> botashka.llmContext 'llm-context(trace, :generate)'
+    botashka.react -> botashka.llmClient 'complete(generate-payload)'
+    anthropic -> botashka.llmClient 'SSE: .clj source code'
     botashka.react -> botashka.specValidator 'validate-tool-source(code)'
     botashka.specValidator -> botashka.toolLibrary 'isolated SCI eval'
     botashka.react -> botashka.toolLibrary 'save-tool! + update index'
     botashka.react -> botashka.executor 'execute-tool(code, args)'
     botashka.executor -> botashka.toolLibrary 'bb eval subprocess'
+    botashka.executor -> botashka.react 'return {:status :stdout}'
     botashka.react -> botashka.sessionTrace 'append :observe(result)'
     botashka.react -> botashka.core 'return result'
-    botashka.core -> botashka.repl 'emit!(answer)'
+    botashka.core -> botashka.repl 'emit!(:assistant-out)'
+  }
+
+  // ── Dynamic: ReAct Loop (built-in tool path with confirmation) ───────────
+
+  dynamic view reactLoopBuiltin {
+    title 'Botashka — ReAct Loop: Built-in Tool Path (with confirmation)'
+
+    botashka.core -> botashka.react 'react-step!(task-doc, session-trace)'
+    botashka.react -> botashka.llmContext 'llm-context(trace, :think)'
+    botashka.llmContext -> botashka.sessionTrace 'select-events :think + tool-index'
+    botashka.react -> botashka.llmClient 'complete(think-payload)'
+    botashka.llmClient -> anthropic 'POST /v1/messages'
+    anthropic -> botashka.llmClient 'SSE: :reuse :shell decision'
+    botashka.react -> botashka.executor 'execute-tool(:shell, args)'
+    botashka.executor -> botashka.repl 'emit! :ask "Run shell: rm …? [y/n]"'
+    botashka.repl -> developer 'displays confirmation prompt'
+    developer -> botashka.repl 'y — approved'
+    botashka.repl -> botashka.executor 'approved'
+    botashka.executor -> botashka.builtins 'dispatch :shell fn'
+    botashka.builtins -> botashka.executor 'return {:stdout :stderr :exit}'
+    botashka.executor -> botashka.react 'return {:status :ok :result stdout}'
+    botashka.react -> botashka.sessionTrace 'append :observe(result)'
+    botashka.react -> botashka.core 'return result'
+    botashka.core -> botashka.repl 'emit!(:assistant-out)'
   }
 
   // ── Dynamic: Goal → Plan → Execute ───────────────────────────────────────
@@ -99,6 +141,8 @@ views {
 
     developer -> botashka.repl 'types goal + @file refs'
     botashka.repl -> botashka.core 'start! read-line'
+    botashka.core -> filesystem 'read @path file contents'
+    filesystem -> botashka.core 'file content'
     botashka.core -> botashka.sessionTrace 'append :file-context + :user-input'
     botashka.core -> botashka.planner 'plan!(goal, api-key, session-trace)'
     botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
@@ -109,7 +153,25 @@ views {
     botashka.planner -> botashka.core 'return tasks map'
     botashka.core -> botashka.sessionTrace 'append :plan'
     botashka.core -> botashka.react 'react-step! per task'
-    botashka.core -> botashka.bbEdn 'update-bb-edn-status!'
+    botashka.core -> botashka.sessionTrace 'reads trace for task-status'
+    botashka.core -> botashka.bbEdn 'update-bb-edn-status! (derived from trace)'
     botashka.core -> botashka.repl 'emit!(answer)'
+  }
+
+  // ── Dynamic: Plan Mutation ────────────────────────────────────────────────
+
+  dynamic view planMutation {
+    title 'Botashka — Plan Mutation (:plan-amend)'
+
+    botashka.react -> botashka.executor 'execute-tool(fetch-url, args)'
+    botashka.executor -> botashka.toolLibrary 'bb eval subprocess'
+    botashka.executor -> botashka.react 'return {:status :error "404"}'
+    botashka.react -> botashka.sessionTrace 'append :observe(error)'
+    botashka.react -> botashka.core 'return {:status :error}'
+    botashka.core -> botashka.planner 'plan-amend!(reason, session-trace)'
+    botashka.planner -> botashka.sessionTrace 'append :plan-amend (before rewrite)'
+    botashka.planner -> botashka.bbEdn 'rewrite bb.edn with new tasks'
+    botashka.planner -> botashka.core 'return amended tasks'
+    botashka.core -> botashka.react 'react-step! with new task'
   }
 }
