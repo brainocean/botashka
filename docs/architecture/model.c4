@@ -18,7 +18,7 @@ model {
     }
 
     container core 'core.clj' {
-      description 'start! loop, emit! output seam, format-event, run-tool helper, session-trace atom, task-status pure fn, @path file parsing. Reads filesystem for @path tokens. Derives task :status from trace before writing bb.edn.'
+      description 'start! loop, emit! output seam, format-event, run-tool helper, session-trace atom, task-status pure fn, @path file parsing, *result* dynamic var (rebound after each task for inter-task data flow). Reads filesystem for @path tokens. Derives task :status from trace before writing bb.edn. Writes sessions/<id>.edn at session end.'
       technology 'Clojure / Babashka'
       style {
         color primary
@@ -26,7 +26,7 @@ model {
     }
 
     container planner 'planner.clj' {
-      description 'Decomposes user goal into ordered steps via LLM. Writes :tasks into bb.edn. Appends :plan-amend event to session-trace before any mid-execution rewrite.'
+      description 'Decomposes user goal into ordered steps via LLM. Writes :tasks into bb.edn. plan-amend! re-plans on task failure: appends :plan-amend event to session-trace before rewriting bb.edn with a revised task map.'
       technology 'Clojure / Babashka'
       style {
         color green
@@ -50,7 +50,7 @@ model {
     }
 
     container specValidator 'spec.clj' {
-      description 'Validates generated tool source in an isolated SCI context before execution. Checks: parseable, loads without error, defines at least one s/def or s/fdef. Generated tools only — built-ins bypass this gate.'
+      description 'Validates generated tool source before execution. Syntactically checks for s/def or s/fdef via regex, then evaluates with sci/eval-string (clojure.spec.alpha is natively available in Babashka SCI). Generated tools only — built-ins bypass this gate.'
       technology 'Clojure / SCI / clojure.spec.alpha'
       style {
         color red
@@ -66,7 +66,7 @@ model {
     }
 
     container sessionTrace 'session-trace' {
-      description 'Append-only vector of typed event maps: :file-context :user-input :plan :think :reuse :generate :validate :execute :observe :plan-amend :assistant-out :ask :error. Single source of truth for task-status, context assembly, and replay. Persisted to sessions/*.edn at session end.'
+      description 'Append-only vector of typed event maps: :file-context :user-input :plan :think :reuse :generate :validate :execute :observe :plan-amend :assistant-out :ask :error. Single source of truth for task-status, context assembly, and replay. Written to sessions/<id>.edn at session end.'
       technology 'Clojure atom (in-memory) + EDN (on-disk)'
       style {
         shape cylinder
@@ -101,7 +101,7 @@ model {
     }
 
     container executor 'Executor' {
-      description 'Routes execution: generated tools → bb eval subprocess (SCI, falls back to clojure -M). Built-in tools → builtins.clj direct fn dispatch. Checks :confirm true flag — emits :ask event and awaits human approval before proceeding. Returns {:status :stdout :stderr} to react.'
+      description 'Routes execution: generated tools → bb -f tools/<name>.clj subprocess (args EDN-encoded on command line; falls back to clojure -M on SCI limits). Built-in tools → builtins.clj direct fn dispatch. Checks :confirm true flag — emits :ask event and awaits human approval before proceeding. Returns {:status :stdout :stderr} to react.'
       technology 'Babashka subprocess / clojure -M'
       style {
         color muted
@@ -180,7 +180,7 @@ model {
 
   botashka.llmClient -[calls]-> anthropic 'POST /v1/messages (SSE)'
 
-  botashka.sessionTrace -[writes]-> filesystem 'persist sessions/*.edn at session end'
+  botashka.sessionTrace -[writes]-> filesystem 'write sessions/<id>.edn at session end'
 
   nreplClient -> botashka.repl 'nREPL :eval — V2+'
 }
