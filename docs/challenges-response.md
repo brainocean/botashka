@@ -212,4 +212,97 @@ The two items worth fixing before writing the first line of implementation code:
 1. **Incremental trace persistence** — append to disk on every `append-event!`, not at session end.
 2. **Explicit retry escalation ladder** in the spec — retry → retry-with-context → `plan-amend!` → ask human.
 
+---
+
+## Round 2 — Response to the Rebuttal Scorecard
+
+The reviewer came back with a scored evaluation of my rebuttal. It's the most useful thing they've written. I'll take it point by point.
+
+---
+
+### On the Meta-Argument
+
+> "The meta-argument doesn't cover everything. These items are v1 prerequisites, not v2 niceties."
+
+Agreed on items 1 and 2 — I already accepted them. On item 3 (concrete timeout/cancellation): "wrap with `timeout`" is genuinely unspecified and the reviewer is right to flag it. I'll add it to the pre-implementation fix list.
+
+---
+
+### On the Rebuttal Scores — Where I Accept the Corrections
+
+**`sci/eval-string` — "Partially holds":**
+
+> "only if namespaces are whitelisted and FS/network are truly excluded. As currently specified ('no capability restrictions'), eval can still burn unbounded CPU and time."
+
+This is the sharpest correction in the scorecard and it's correct. The spec says "isolated SCI context" but never specifies which namespaces are whitelisted. That makes the safety claim hollow — SCI can be tightly sandboxed, but only if you do the work. The reviewer's third addition to the fix list is right:
+
+> **SCI namespace whitelist** — explicitly declare which namespaces are accessible in the validation context; verify no FS/network access is possible; add a timeout.
+
+This goes on the pre-implementation list. It's not a v2 concern — it's the thing that makes "isolated SCI context" mean something.
+
+**Truncation — "Partially holds — leans rationalization":**
+
+> "The design issue is the *truncation policy* (what gets pinned, what gets summarized, what gets dropped). 'Everyone truncates' does not address quality regressions from naive oldest-first FIFO loss."
+
+Fair. "Everyone truncates" was the wrong argument. The right argument is: for a v1 tool with short sessions and a handful of tasks, FIFO truncation on the largest payloads (`:file-context` and `:observe`) is adequate. The concern is real for long sessions — but the reviewer is right that the *policy* is underspecified, not just the mechanism. The spec should state the truncation policy explicitly: large payloads truncated first; `:plan`, `:think`, and `:plan-amend` events are always included regardless of size.
+
+**Unsandboxed eval — "Partially holds — leans rationalization":**
+
+> "'Claude Code does it too' is a rationalization. Minimal guardrails (diffs, cwd fences) reduce foot-guns without contradicting the local-tool premise."
+
+Accepted. The "they do it too" argument was lazy. The correct argument is the single-operator trust model, not precedent. The reviewer's suggestion — diffs and cwd fences — is genuinely cheap and worth adding to the executor. A generated tool that writes outside the project directory is almost certainly a bug, and a cwd-fence costs one line.
+
+---
+
+### On the 3 Genuinely Open Challenges
+
+**1. Context Management Policy**
+
+> "Naive truncation actively harms the quality of the primary agent loop — this is a v1 correctness concern, not a scalability concern."
+
+I pushed back too hard on this. The reviewer is right that the policy matters for correctness, not just scalability. The fix for v1 is simple and should be stated: `:plan`, `:think`, `:plan-amend`, and `:user-input` events are pinned — they are always included. Only `:file-context` and `:observe` payloads are truncated or dropped when context pressure is high. This makes the truncation policy explicit and prevents the agent from losing its plan or decision history.
+
+**2. Irreversible Action Safeguards Beyond `:confirm true`**
+
+> "Generated tools can write files, make network calls, modify state — and none of those go through a confirmation gate. The human sees only the tool name and args, not what the tool will actually do."
+
+This is the hardest open challenge and the reviewer is right that my rebuttal didn't address it. I said "the human is the last gate" — but if the human can only see the tool name and args, the gate provides weak protection. Three concrete mitigations that fit v1:
+
+- The generated tool's description comment and spec are shown to the human before first execution (not just the tool name).
+- A cwd fence in the executor rejects any file write outside the project directory without explicit override.
+- `:confirm true` should cover any generated tool that includes `http`, `io`, `shell`, or `fs` in its namespace requires.
+
+None of these are complete sandboxing. They narrow the blast radius without requiring a container.
+
+**3. Robust Process Supervision**
+
+> "Cleanup of grandchild processes spawned inside a tool, deterministic log collation when a tool produces output on multiple streams, or backpressure when stdout is large."
+
+Acknowledged as genuinely open. For v1: a timeout on the subprocess handles the hang case; stdout is captured and truncated at the 4k limit. Grandchild process cleanup and stream multiplexing are v2 concerns for when real tool complexity makes them unavoidable. The reviewer is right that "PIDs and `timeout`" was too breezy an answer — I'll keep this on the open list.
+
+---
+
+### Updated Pre-Implementation Fix List
+
+| # | Item | Priority |
+|---|---|---|
+| 1 | **Incremental trace persistence** — append atomically on every `append-event!`, not at session end | V1 blocker |
+| 2 | **Explicit retry escalation ladder** — retry → retry-with-context → `plan-amend!` → ask human, bounded attempts at each level | V1 blocker |
+| 3 | **SCI namespace whitelist** — declare which namespaces are accessible in validation context; exclude FS/network; add execution timeout | V1 blocker |
+| 4 | **Pinned event types in truncation policy** — `:plan`, `:think`, `:plan-amend`, `:user-input` always included; only large payloads truncated | V1 correctness |
+| 5 | **cwd fence in executor** — reject generated tool file writes outside project directory | V1 safety |
+| 6 | **Tool description shown before first execution** — human sees description + spec-in/out, not just tool name | V1 safety |
+| 7 | **Subprocess timeout** — configurable, enforced by executor, defaults to 30s | V1 reliability |
+
+Items 1–3 are blockers. Items 4–7 are small enough to implement alongside the first working code.
+
+---
+
+### Final Score
+
+The reviewer's scorecard is honest and well-argued. The three open challenges it names are genuinely open — I didn't adequately address irreversible action safeguards or the SCI whitelist in my first response. The context management policy criticism was also more correct than I gave it credit for.
+
+The meta-argument ("v1 tool, not a platform") still holds for the structural critiques. But the reviewer correctly identified the places where I used it as a shield for things that are actually cheap to fix. Those things should be fixed.
+
+
 Everything else is either a v2 concern or a misread of the design.
