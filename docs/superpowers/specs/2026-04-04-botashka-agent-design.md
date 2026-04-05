@@ -126,9 +126,9 @@ Each task entry has a `:doc` string describing its purpose, making `bb.edn` a hu
 
 **bb.edn is the human interaction layer, not the execution substrate.** The agent can run tasks without bb.edn — it executes task lists as plain in-memory EDN data. bb.edn is the window the human looks through: inspectable, editable, committed to git.
 
-Example `bb.edn` written by the agent (`run-tool` is a Botashka-provided helper defined in `:init` that triggers the ReAct loop for a named tool with given args):
+Example `bb.edn` written by the agent (`run-tool` and `*result*` are exported from `botashka.core` via `:init`):
 ```clojure
-{:init (require '[botashka.core :refer [run-tool]])
+{:init (require '[botashka.core :refer [run-tool *result*]])
  :tasks
  {fetch-notes  {:doc "Fetch HTML from target URL"
                 :task (run-tool 'fetch-url {:url url})}
@@ -139,6 +139,8 @@ Example `bb.edn` written by the agent (`run-tool` is a Botashka-provided helper 
                 :doc "Write IDs to output.csv"
                 :task (run-tool 'write-csv {:rows *result*})}}}
 ```
+
+**`*result*` — inter-task data flow.** `*result*` is a dynamic var defined in `core.clj`. After each task completes, `run-goal!` rebinds `*result*` to that task's stdout before executing the next task. This makes the previous task's output available in subsequent `run-tool` calls. For the root agent, `run-goal!` manages this binding automatically via a `reduce` loop. For subagents (in-memory task maps), callers are responsible for passing `*result*` bindings explicitly if inter-task data flow is needed.
 
 ### Plan Mutation
 
@@ -154,6 +156,19 @@ Plan mutation is **always explicit**: the agent emits a `:plan-amend` event befo
 ```
 
 `select-events :think` includes `:plan-amend` events so the LLM has full context about what has already been tried and why it changed. Silent rewrites are not allowed — every plan change must produce a `:plan-amend` event in the trace.
+
+`plan-amend!` in `planner.clj` is the entry point for plan mutation. It appends the `:plan-amend` event, re-calls the LLM for a revised task map, emits the event through `emit!`, and rewrites `bb.edn`:
+
+```clojure
+(defn plan-amend!
+  "Re-plan when a task fails or the goal requires revision.
+  Appends :plan-amend to session-trace before calling the LLM, so the revised
+  plan has full context about what failed and why."
+  [reason old-task-names api-key bb-edn-path session-trace emit!]
+  ...)
+```
+
+`core.clj` calls `plan-amend!` when `react-step!` returns `{:status :error}` and a retry is warranted.
 
 ### Subagents and Task Lists
 
@@ -273,7 +288,7 @@ Each `bt/run` call triggers the ReAct loop for that task step. The loop has **4 
                                    │
                                    ▼
                          ┌──────────────────┐
-                         │   3. EXECUTE     │  bb eval tools/<name>.clj
+                         │   3. EXECUTE     │  bb -f tools/<name>.clj
                          │                  │  stdout/stderr captured
                          │                  │  SCI limit? → clojure -M
                          └────────┬─────────┘
@@ -296,13 +311,14 @@ Each `bt/run` call triggers the ReAct loop for that task step. The loop has **4 
    Reuse skips step 2 entirely and goes straight to EXECUTE. Generate and Compose both go through step 2.
 
 2. **GENERATE** (only for Generate and Compose decisions) — LLM writes a `.clj` snippet with a description comment, `:requires`, and clojure.spec definitions for input and output. **Spec validation happens immediately on the generated source** before anything else:
-   - `spec/conform` on the generated code structure and sample inputs
+   - Syntactic check (`re-find`) confirms at least one `s/def` or `s/fdef` is present
+   - `sci/eval-string` evaluates the source in Babashka's native SCI (where `clojure.spec.alpha` is available) to catch parse and runtime errors
    - Failure → error fed back to LLM for retry (max 3 attempts)
    - Pass → tool saved to `tools/`, entry appended to `tool-index.edn`
 
    The rule is simple: **any generated code is validated before execution, always** — whether it is novel logic or a composition of existing tools. A composed tool is saved to `tools/` like any other and becomes reusable.
 
-3. **EXECUTE** — run the tool (reused or freshly generated+validated) via `bb eval tools/<name>.clj` with bound args. stdout/stderr captured as observation. If SCI limit hit → spawn `clojure -M` subprocess as escape hatch.
+3. **EXECUTE** — run the saved tool file via `bb -f tools/<name>.clj`. Args are passed as an EDN-encoded string on the command line and read inside the tool via `(first *command-line-args*)`. stdout/stderr captured as observation. If SCI limit hit → spawn `clojure -M` subprocess as escape hatch.
 
 4. **OBSERVE** — result returned to LLM context. Loop continues until the task step is complete or needs human input.
 
@@ -569,6 +585,17 @@ All agent output goes through a single `emit!` function in `core.clj`. This is t
 
 Every `emit!` call appends to `session-trace`. The trace is the single source of truth for replay, debugging, and LLM context assembly.
 
+### Session Persistence
+
+At session end, `core.clj` writes the full trace to `sessions/<session-id>.edn` on disk. The session ID is a timestamp-based string (e.g. `"2026-04-04T14:32:00"`). This allows post-session replay and debugging. The file is plain EDN — the same format as the in-memory vector. Persistence is write-once at session end; it is never read back during the same session.
+
+```clojure
+;; Written to sessions/2026-04-04T14:32:00.edn at session end
+(spit (str "sessions/" session-id ".edn") (pr-str @session-trace))
+```
+
+Session files are gitignored by default. Promoting a session for debugging purposes (e.g. to file a bug report) is an explicit user action.
+
 ### File context — @path syntax
 
 Users can reference files inline using `@path` syntax:
@@ -722,14 +749,17 @@ botashka/
 | Tool types | Generated tools + built-in tools | Built-ins are trusted infrastructure (`:builtin true` in index); generated tools must pass spec validation; executor dispatches differently for each |
 | Confirmation policy | `:confirm true` on `:shell` and `:llm-complete` | High-risk built-ins require `y/n` before execution; others run freely |
 | Tool selection | LLM reads index (built-ins + generated) | Keeps decision in one place, no embedding overhead |
-| Validation | clojure.spec | Machine-checkable, instruments agent's own tools; built-ins are pre-trusted and bypass validation |
+| Spec validation | Syntactic `re-find` for `s/def`/`s/fdef` + `sci/eval-string` | Avoids macro-interception issues; `clojure.spec.alpha` is natively available in Babashka SCI |
 | Planning substrate | bb.edn is the human-editable window; subagents run from data, not files | Keeps human interaction layer separate from execution |
-| Plan mutation | Allowed, but only via explicit `:plan-amend` event | Silent rewrites lose reasoning chain; `:plan-amend` makes history queryable |
+| Plan mutation | Allowed, but only via explicit `plan-amend!` + `:plan-amend` event | Silent rewrites lose reasoning chain; `:plan-amend` makes history queryable |
 | Subagent task lists | In-memory EDN map passed to `react-step!` loop | No bb.edn needed; `--config` available as opt-in for human-inspectable subagents |
 | Task status | Derived from `session-trace` via `task-status` pure fn | Trace is authoritative; `:status` in bb.edn is display-only convenience |
+| Task output | `*result*` dynamic var; rebound by `run-goal!` after each task | Explicit data flow without hidden globals; bb.edn task bodies read `*result*` naturally |
+| Session persistence | Trace written to `sessions/<id>.edn` at session end | Plain EDN; replay and debug without a DB |
 | Runtime data structure | `session-trace` (append-only event vector) | Single source of truth for replay, debug, and context assembly |
-| Context assembly | `llm-context` pure fn in `llm_context.clj` | Selects relevant trace slice per LLM call — no embedding, no vector search |
-| Communication | `emit!` function (v1 println → nREPL `:out` in v2) | Single seam — transport swappable without touching agent core |
+| Context assembly | `llm-context` pure fn in `llm_context.clj`; ctx map `{:system :messages}` | Selects relevant trace slice per LLM call — no embedding, no vector search |
+| LLM interface | `complete` accepts `{:system <string> :messages <string>}` ctx map | Matches `llm-context` output directly; `anthropic-version` header required |
+| Communication | `emit!` function (v1 println → nREPL `:out` within eval op in v2) | Eval-scoped `:out` delivery; no custom ops or broadcast protocol needed for v1/v2 |
 | LLM v1 | Non-streaming `complete` wrapping SSE | Simple for v1; `stream-chat` is the v2 upgrade path |
 | V1 UI | `bb repl` + `start!` loop | Zero TUI code; `emit!` is the seam for future adapters |
 
@@ -740,8 +770,10 @@ botashka/
 The preferred v2 UI path is **nREPL**, not a custom TUI. When Babashka runs `bb nrepl-server`, any nREPL client (CIDER, Calva, vim-iced, a custom terminal client) connects and receives Botashka output as standard nREPL `:out` messages — one per `println`. This means:
 
 - **Editor integration is free.** CIDER/Calva users get Botashka inline in their editor with zero extra code — just `(b/start!)` in the REPL.
-- **Custom TUI becomes a thin nREPL client.** It connects to the nREPL server and renders `:out` messages. No custom protocol, no channel plumbing at the UI layer.
-- **Any nREPL client is a valid Botashka UI** — the protocol is already defined.
+- **`:out` messages are eval-scoped.** nREPL delivers `:out` messages to the client that initiated the active `eval` op. This means `println` → `:out` works reliably for any `emit!` call within the `start!` eval. Out-of-band broadcast to arbitrary connected clients is **not** supported by the stock protocol and is not a V2 goal.
+- **Custom TUI becomes a thin nREPL client.** It evaluates `(b/start!)` and renders the `:out` stream. No custom protocol needed.
+
+> **V2 scope is intentionally narrow:** swap `emit!` to print within a long-lived nREPL `eval` op. Multi-client broadcast or push-to-arbitrary-session are V3 concerns if they arise.
 
 ```
   V1                                V2 / V3
@@ -755,9 +787,7 @@ The preferred v2 UI path is **nREPL**, not a custom TUI. When Babashka runs `bb 
      │                                    │                   │ nREPL tcp
      ▼                                    ▼                   │
   emit! ──► println ──► stdout     emit! ──► println   ◄──── :out msgs
-                                    OR
-                               emit! ──► nrepl.transport/send
-                                         (V2 explicit dispatch)
+                                    (within eval op — eval-scoped)
 
   ─── only emit! body changes between V1 and V2 ───
   ─── agent core, react-step!, planner unchanged  ───
@@ -769,12 +799,12 @@ nREPL's protocol is inherently message-based and async. During a single `eval` r
 
 | Message | When sent |
 |---|---|
-| `{:out "…"}` | One per `println`/`flush` — delivered immediately |
+| `{:out "…"}` | One per `println`/`flush` — delivered to the eval's initiating client |
 | `{:err "…"}` | stderr |
 | `{:value "…"}` | Final return value |
 | `{:status "done"}` | Completion sentinel |
 
-For Botashka: each `(emit! event)` → `(println …)` → one `:out` message pushed to the client in real time. For token-level LLM streaming, each `(print token)(flush)` → one `:out` message per token. **No protocol extensions, custom middleware, or new ops required.**
+For Botashka: each `(emit! event)` → `(println …)` → one `:out` message delivered to the client that started the `(b/start!)` eval. For token-level LLM streaming, each `(print token)(flush)` → one `:out` message per token. **No protocol extensions, custom middleware, or new ops required for this use case.**
 
 nREPL 1.3 (August 2024) specifically improves this path:
 - Custom async executors — the `future`-based SSE reader integrates cleanly with nREPL's executor model
@@ -791,15 +821,15 @@ V1 `emit!` prints directly — already works as nREPL `:out` automatically when 
   (println (format-event event)))
 ```
 
-V2 `emit!` swaps the body for explicit session dispatch — zero other changes in the codebase:
+V2 `emit!` is the same in practice — `println` inside a nREPL eval already routes to `:out`. An explicit `nrepl.transport/send` dispatch is only needed if Botashka moves to a custom op or needs to route to a specific session:
 
 ```clojure
-;; V2 — explicit nREPL session dispatch
+;; V2 optional — explicit session dispatch for custom-op scenarios only
 (defn emit! [event]
   (nrepl.transport/send *session* {:op "out" :out (format-event event)}))
 ```
 
-For token streaming in v2, bind `*out*` in the `future` to the nREPL session's output stream — nREPL 1.3 handles this reliably:
+For token streaming, bind `*out*` in the `future` to the nREPL session's output stream — nREPL 1.3 handles this reliably:
 
 ```clojure
 (future
