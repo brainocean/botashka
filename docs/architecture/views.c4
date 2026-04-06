@@ -53,6 +53,7 @@ views {
     title 'Botashka — Agent Core (ReAct + Context + Built-ins)'
     include botashka.core
     include botashka.planner
+    include botashka.todoClj
     include botashka.react
     include botashka.llmContext
     include botashka.specValidator
@@ -66,6 +67,8 @@ views {
     include botashka.core -> botashka.planner
     include botashka.core -> botashka.react
     include botashka.core -> botashka.sessionTrace
+    include botashka.core -> botashka.todoClj
+    include botashka.todoClj -> botashka.sessionTrace
     include botashka.planner -> botashka.llmContext
     include botashka.planner -> botashka.llmClient
     include botashka.planner -> botashka.sessionTrace
@@ -144,17 +147,16 @@ views {
     botashka.core -> filesystem 'read @path file contents'
     filesystem -> botashka.core 'file content'
     botashka.core -> botashka.sessionTrace 'append :file-context + :user-input'
-    botashka.core -> botashka.planner 'plan!(goal, api-key, session-trace)'
+    botashka.core -> botashka.planner 'plan!(goal, ctx)'
     botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
     botashka.planner -> botashka.llmClient 'complete(plan-payload)'
     botashka.llmClient -> anthropic 'POST /v1/messages'
-    anthropic -> botashka.llmClient 'EDN tasks map'
-    botashka.planner -> botashka.bbEdn 'write-plan!(tasks)'
-    botashka.planner -> botashka.core 'return tasks map'
-    botashka.core -> botashka.sessionTrace 'append :plan'
+    anthropic -> botashka.llmClient 'EDN tasks list'
+    botashka.planner -> botashka.sessionTrace 'append :todo event'
+    botashka.planner -> botashka.core 'return tasks'
+    botashka.core -> botashka.todoClj 'current-todo + topo-sort'
+    botashka.core -[writes]-> botashka.bbEdn 'publish-bb-edn! (derived from :todo)'
     botashka.core -> botashka.react 'react-step! per task'
-    botashka.core -> botashka.sessionTrace 'reads trace for task-status'
-    botashka.core -> botashka.bbEdn 'update-bb-edn-status! (derived from trace)'
     botashka.core -> botashka.repl 'emit!(answer)'
   }
 
@@ -168,14 +170,15 @@ views {
     botashka.executor -> botashka.react 'return {:status :error "404"}'
     botashka.react -> botashka.sessionTrace 'append :observe(error)'
     botashka.react -> botashka.core 'return {:status :error}'
-    botashka.core -> botashka.planner 'plan-amend!(reason, old-task-names, session-trace, emit!)'
-    botashka.planner -> botashka.sessionTrace 'append :plan-amend (before LLM call)'
+    botashka.core -> botashka.planner 'plan-amend!(ctx, reason, old-task-names)'
+    botashka.planner -> botashka.sessionTrace 'append :plan-amend + :todo (before LLM call)'
     botashka.planner -> botashka.llmContext 'llm-context(amend-trace, :plan)'
     botashka.planner -> botashka.llmClient 'complete(revised-plan-ctx)'
     botashka.llmClient -> anthropic 'POST /v1/messages'
-    anthropic -> botashka.llmClient 'EDN revised tasks map'
-    botashka.planner -> botashka.bbEdn 'write-plan!(revised tasks)'
-    botashka.planner -> botashka.core 'return revised tasks map'
+    anthropic -> botashka.llmClient 'EDN revised tasks list'
+    botashka.planner -> botashka.core 'return revised tasks'
+    botashka.core -> botashka.todoClj 'current-todo + topo-sort'
+    botashka.core -[writes]-> botashka.bbEdn 'publish-bb-edn! (derived from new :todo)'
     botashka.core -> botashka.react 'react-step! with new task'
   }
 }

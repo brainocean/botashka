@@ -18,7 +18,7 @@ model {
     }
 
     container core 'core.clj' {
-      description 'start! loop, emit! output seam, format-event, run-tool helper, session-trace atom, task-status pure fn, @path file parsing, *result* dynamic var (rebound after each task for inter-task data flow). Reads filesystem for @path tokens. Derives task :status from trace before writing bb.edn. Writes sessions/<id>.edn at session end.'
+      description 'start! loop, emit! output seam, format-event, run-goal! (topo-sort + task iteration), @path file parsing, publish-bb-edn! (derives bb.edn from todo state at task-structure boundaries). Reads filesystem for @path tokens. Derives task :status from trace.'
       technology 'Clojure / Babashka'
       style {
         color primary
@@ -26,7 +26,7 @@ model {
     }
 
     container planner 'planner.clj' {
-      description 'Decomposes user goal into ordered steps via LLM. Writes :tasks into bb.edn. plan-amend! re-plans on task failure: appends :plan-amend event to session-trace before rewriting bb.edn with a revised task map.'
+      description 'Decomposes user goal into ordered steps via LLM. Appends :todo event to session-trace. plan-amend! handles structural replanning: appends :plan-amend + new :todo event, triggers bb.edn publish.'
       technology 'Clojure / Babashka'
       style {
         color green
@@ -66,7 +66,7 @@ model {
     }
 
     container sessionTrace 'session-trace' {
-      description 'Append-only vector of typed event maps: :file-context :user-input :plan :think :reuse :generate :validate :execute :observe :plan-amend :assistant-out :ask :error. Single source of truth for task-status, context assembly, and replay. Written to sessions/<id>.edn at session end.'
+      description 'Append-only vector of typed event maps: :file-context :user-input :todo :todo-update :plan-amend :think :reuse :generate :validate :execute :observe :assistant-out :ask :error. Single source of truth for task-status, todo state, context assembly, and replay. Written to sessions/<id>.edn incrementally.'
       technology 'Clojure atom (in-memory) + EDN (on-disk)'
       style {
         shape cylinder
@@ -75,11 +75,19 @@ model {
     }
 
     container bbEdn 'bb.edn' {
-      description 'Live human-readable plan. Planner writes :tasks here. Human can inspect and edit at any time. :status field derived from session-trace and written by core after each task step — display only, never read as ground truth.'
+      description 'Published human window — derived from todo state by core.clj at task-structure boundaries. Human can inspect, edit, and run tasks manually with bb <task-name>. Never read back by the agent as ground truth. Babashka task runner used as human-facing CLI only.'
       technology 'EDN / Babashka tasks'
       style {
         shape storage
         color sky
+      }
+    }
+
+    container todoClj 'todo.clj' {
+      description 'Pure todo state derivation. current-todo: derives live task list from last :todo event merged with subsequent :todo-update events. task-status: derives :open/:in-progress/:finished/:error per task. topo-sort: topological ordering of tasks by :depends vectors for run-goal! iteration.'
+      technology 'Clojure / Babashka'
+      style {
+        color green
       }
     }
 
@@ -93,7 +101,7 @@ model {
     }
 
     container builtins 'builtins.clj' {
-      description 'Built-in tool dispatch — direct fn calls, no subprocess, no spec validation. Registry: read-file, write-file, list-dir, shell (:confirm true), session-trace, task-status, tool-index, save-tool, llm-complete (:confirm true). :confirm true tools emit :ask event and await human y/n before executing.'
+      description 'Built-in tool dispatch — direct fn calls, no subprocess, no spec validation. Registry: read-file, write-file, list-dir, shell (:confirm true), todo-update, session-trace, task-status, tool-index, save-tool, llm-complete (:confirm true). :confirm true tools emit :ask event and await human y/n before executing.'
       technology 'Clojure / Babashka'
       style {
         color amber
@@ -145,17 +153,19 @@ model {
   botashka.repl -> botashka.core 'calls start!'
 
   botashka.core -[reads]-> filesystem '@path file reads'
-  botashka.core -> botashka.sessionTrace 'append-event! (reads + writes)'
-  botashka.core -> botashka.planner 'plan!(goal, session-trace)'
-  botashka.core -> botashka.react 'react-step!(task, session-trace)'
-  botashka.core -[writes]-> botashka.bbEdn 'update-bb-edn-status! (derived from trace)'
+  botashka.core -> botashka.sessionTrace 'append-event!'
+  botashka.core -> botashka.planner 'plan!(goal, ctx)'
+  botashka.core -> botashka.react 'react-step!(task, ctx)'
+  botashka.core -> botashka.todoClj 'current-todo + topo-sort'
+  botashka.core -[writes]-> botashka.bbEdn 'publish-bb-edn! (derived from todo state)'
   botashka.core -[emits]-> botashka.repl 'emit!(event) including :ask for confirmations'
 
   botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
   botashka.planner -> botashka.llmClient 'complete(messages, api-key)'
   botashka.planner -[reads]-> botashka.sessionTrace 'context assembly input'
-  botashka.planner -[writes]-> botashka.sessionTrace 'append :plan-amend before rewrite'
-  botashka.planner -[writes]-> botashka.bbEdn 'write-plan!(tasks)'
+  botashka.planner -[writes]-> botashka.sessionTrace 'append :todo (initial + replan) + :plan-amend'
+
+  botashka.todoClj -[reads]-> botashka.sessionTrace 'derive current-todo from :todo + :todo-update events'
 
   botashka.react -> botashka.llmContext 'llm-context(trace, :think/:generate)'
   botashka.react -> botashka.llmClient 'complete(messages, api-key)'
@@ -168,19 +178,20 @@ model {
   botashka.llmContext -[reads]-> botashka.sessionTrace 'select-events + render-trace'
 
   botashka.specValidator -[validates]-> botashka.toolLibrary 'isolated SCI eval (generated tools only)'
-  botashka.executor -[executes]-> botashka.toolLibrary 'bb eval subprocess (generated tools)'
+  botashka.executor -[executes]-> botashka.toolLibrary 'bb -f subprocess (generated tools)'
   botashka.executor -> botashka.builtins 'direct fn dispatch (built-in tools)'
   botashka.executor -[emits]-> botashka.repl 'emit! :ask → await y/n (confirm true tools)'
 
   botashka.builtins -[reads]-> filesystem 'read-file, list-dir'
   botashka.builtins -[writes]-> filesystem 'write-file, save-tool'
   botashka.builtins -[reads]-> botashka.sessionTrace 'session-trace built-in'
+  botashka.builtins -[writes]-> botashka.sessionTrace 'todo-update built-in appends :todo-update event'
   botashka.builtins -> botashka.toolLibrary 'tool-index, save-tool built-ins'
   botashka.builtins -[calls]-> botashka.llmClient 'llm-complete built-in'
 
   botashka.llmClient -[calls]-> anthropic 'POST /v1/messages (SSE)'
 
-  botashka.sessionTrace -[writes]-> filesystem 'write sessions/<id>.edn at session end'
+  botashka.sessionTrace -[writes]-> filesystem 'append sessions/<id>.edn incrementally'
 
   nreplClient -> botashka.repl 'nREPL :eval — V2+'
 }
