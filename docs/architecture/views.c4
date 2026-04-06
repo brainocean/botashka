@@ -155,7 +155,6 @@ views {
     botashka.planner -> botashka.sessionTrace 'append :todo event'
     botashka.planner -> botashka.core 'return tasks'
     botashka.core -> botashka.todoClj 'current-todo + topo-sort'
-    botashka.core -[writes]-> botashka.bbEdn 'publish-bb-edn! (derived from :todo)'
     botashka.core -> botashka.react 'react-step! per task'
     botashka.core -> botashka.repl 'emit!(answer)'
   }
@@ -178,7 +177,6 @@ views {
     anthropic -> botashka.llmClient 'EDN revised tasks list'
     botashka.planner -> botashka.core 'return revised tasks'
     botashka.core -> botashka.todoClj 'current-todo + topo-sort'
-    botashka.core -[writes]-> botashka.bbEdn 'publish-bb-edn! (derived from new :todo)'
     botashka.core -> botashka.react 'react-step! with new task'
   }
 }

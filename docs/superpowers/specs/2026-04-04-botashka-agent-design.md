@@ -9,7 +9,7 @@
 
 ## Overview
 
-Botashka is a local, general-purpose agentic assistant — a Clojure-native alternative to tools like Claude Code or OpenClaw. Its core idea: instead of calling predefined JSON tools, the agent generates and reuses small, composable Clojure snippets as its action space (CodeAct style). Babashka provides the runtime; clojure.spec provides validation; bb.edn tasks provide the planning substrate.
+Botashka is a local, general-purpose agentic assistant — a Clojure-native alternative to tools like Claude Code or OpenClaw. Its core idea: instead of calling predefined JSON tools, the agent generates and reuses small, composable Clojure snippets as its action space (CodeAct style). Babashka provides the runtime; clojure.spec provides validation; the session-trace is the planning substrate.
 
 ---
 
@@ -19,7 +19,7 @@ Botashka is a local, general-purpose agentic assistant — a Clojure-native alte
 - Clojure/Babashka as the primary runtime — minimal dependencies, fast startup
 - Code generation as the primary action mechanism (not JSON tool calls)
 - Self-growing tool library: agent generates, validates, saves, and reuses tools
-- Human-readable, inspectable plan (bb.edn) the user can edit at any time
+- `(b/tasks)` REPL command prints current todo state; human can inspect progress at any time
 - Single `emit!` output seam so future UIs (nREPL clients, Telegram, WeChat) require zero agent core changes
 
 ---
@@ -40,55 +40,34 @@ Botashka is a local, general-purpose agentic assistant — a Clojure-native alte
 
 ### Todo System
 
-Botashka implements its own lightweight todo system rather than using Babashka's task runner as the execution substrate. Babashka has no programmatic in-memory task API — its dependency resolution and `:depends` topological ordering are entirely `bb.edn`-bound. Using it as the agent's live planning state would mean rewriting a Babashka execution file on every LLM update, which is fragile and unnecessary.
-
-Instead, the live plan lives in the **session-trace** as `:todo` and `:todo-update` events. `bb.edn` is a **publish target** — written by `core.clj` at task-structure boundaries for human inspection and manual execution, never read back as ground truth.
-
-```
-session-trace (:todo + :todo-update events)   ← agent's live working state
-        │
-        │  publish only when task structure changes
-        ▼
-bb.edn                                         ← human window (Babashka-executable)
-```
+Botashka implements its own lightweight todo system. The live plan lives entirely in the **session-trace** as `:todo` and `:todo-update` events — no file on disk, no Babashka task runner involved at execution time.
 
 When given a goal, the planner LLM decomposes it into ordered steps and appends a `:todo` event to the trace:
 
 ```clojure
 {:type  :todo
- :tasks [{:name "fetch-notes" :doc "Fetch HTML from target URL"    :status :open :depends []       :notes nil}
-         {:name "extract-ids" :doc "Parse SAP note IDs from HTML"  :status :open :depends ["fetch-notes"] :notes nil}
-         {:name "save-csv"    :doc "Write IDs to output.csv"       :status :open :depends ["extract-ids"] :notes nil}]}
+ :tasks [{:name "fetch-notes" :doc "Fetch HTML from target URL"   :status :open :depends []              :notes nil}
+         {:name "extract-ids" :doc "Parse SAP note IDs from HTML" :status :open :depends ["fetch-notes"] :notes nil}
+         {:name "save-csv"    :doc "Write IDs to output.csv"      :status :open :depends ["extract-ids"] :notes nil}]}
 ```
 
-The LLM can update individual tasks at any time via the `:todo-update` built-in — changing `:status` or adding `:notes` without triggering a `bb.edn` rewrite:
+The LLM updates individual tasks at any time via the `:todo-update` built-in — changing `:status` or adding `:notes`:
 
 ```clojure
-;; appended to session-trace by the :todo-update built-in
 {:type :todo-update :name "fetch-notes" :status :in-progress :notes "Got 404, retrying with proxy"}
 ```
 
-The current todo state is always derived from the trace — the last `:todo` event merged with all subsequent `:todo-update` events for that task. This is a pure function of the trace, consistent with how `task-status` works.
+The current todo state is always derived from the trace — the last `:todo` event merged with all subsequent `:todo-update` events. This is a pure function of the trace, consistent with `task-status`.
 
-`run-goal!` iterates tasks in dependency order (topological sort on `:depends`), calling `react-step!` for each. Dependency ordering is implemented directly in `core.clj` — a trivial topological sort over the `:depends` vectors, replacing the need for Babashka's task runner at execution time.
+`run-goal!` iterates tasks in dependency order via a topological sort on `:depends`, calling `react-step!` for each. This replaces Babashka's task runner entirely at execution time.
 
-**`bb.edn` is published, not executed.** After each task-structure change (new `:todo` event or structural `plan-amend!`), `core.clj` writes `bb.edn` from the current todo state. This gives the human a Babashka-executable snapshot: runnable with `bb fetch-notes`, inspectable, editable. Babashka's task runner is leveraged purely as a human-facing CLI — not as the agent's execution substrate.
+**Human visibility** is provided by `(b/tasks)` — a REPL helper that prints the current todo state derived from the trace:
 
-Example published `bb.edn`:
-```clojure
-{:init (require '[botashka.core :refer [run-tool]])
- :tasks
- {fetch-notes  {:doc    "Fetch HTML from target URL"
-                :status :finished
-                :task   (run-tool 'fetch-url {:url url})}
-  extract-ids  {:depends [fetch-notes]
-                :doc     "Parse SAP note IDs from HTML"
-                :status  :in-progress
-                :task    (run-tool 'parse-sap-ids)}
-  save-csv     {:depends [extract-ids]
-                :doc     "Write IDs to output.csv"
-                :status  :open
-                :task    (run-tool 'write-csv)}}}
+```
+botashka> (b/tasks)
+  ✓ fetch-notes   Fetch HTML from target URL
+  ● extract-ids   Parse SAP note IDs from HTML   [got 404, retrying with proxy]
+  ○ save-csv      Write IDs to output.csv
 ```
 
 The agent can amend the plan mid-execution — see **Plan Mutation** below.
@@ -99,9 +78,9 @@ The LLM is allowed to amend the plan mid-execution — for example when an `:obs
 
 Plan mutation is **always explicit**. There are two levels:
 
-**Lightweight update** — the LLM calls `:todo-update` to change `:status` or `:notes` on an existing task. No `bb.edn` rewrite, no `:plan-amend` event. Fast and cheap.
+**Lightweight update** — the LLM calls `:todo-update` to change `:status` or `:notes` on an existing task. Fast and cheap, no `:plan-amend` event.
 
-**Structural replan** — when task names, dependencies, or the task set itself changes, the agent emits a `:plan-amend` event followed by a new `:todo` event with the revised task list:
+**Structural replan** — when task names, dependencies, or the task set itself changes, the agent appends a `:plan-amend` event followed by a new `:todo` event with the revised task list:
 
 ```clojure
 {:type      :plan-amend
@@ -114,9 +93,9 @@ Plan mutation is **always explicit**. There are two levels:
          {:name "parse"       :doc "Extract IDs"     :status :open :depends ["proxy-fetch"]}]}
 ```
 
-After a structural replan, `core.clj` publishes the new todo state to `bb.edn`. `select-events :think` includes `:plan-amend` events so the LLM has full context about what has already been tried and why it changed. Silent structural rewrites are not allowed.
+After a structural replan, `select-events :think` includes `:plan-amend` events so the LLM has full context about what has already been tried and why it changed. Silent structural rewrites are not allowed.
 
-`plan-amend!` in `planner.clj` is the entry point for structural replanning. It appends `:plan-amend` + `:todo` events, re-calls the LLM for a revised task list, and triggers `bb.edn` publication:
+`plan-amend!` in `planner.clj` is the entry point for structural replanning. It appends `:plan-amend` + `:todo` events and re-calls the LLM for a revised task list:
 
 ```clojure
 (defn plan-amend!
@@ -131,17 +110,16 @@ After a structural replan, `core.clj` publishes the new todo state to `bb.edn`. 
 
 ### Subagents and Task Lists
 
-For subagents spawned programmatically mid-session, `bb.edn` is not used. The subagent receives a fresh `session-trace` atom and a `:todo` event as its starting state. It runs its own `run-goal!` loop against that trace — no file writes, no `bb.edn` publication unless explicitly requested.
+For subagents spawned programmatically mid-session, the subagent receives a fresh `session-trace` atom and a `:todo` event as its starting state. It runs its own `run-goal!` loop against that trace — no external file writes required.
 
-| Agent type | Todo state | bb.edn written? |
-|---|---|---|
-| Root agent | `:todo` events in shared session-trace | Yes — published at task-structure boundaries |
-| Programmatic subagent | `:todo` events in own fresh session-trace | No |
-| Human-inspectable subagent | `:todo` events + explicit publish step | Yes — explicit opt-in |
+| Agent type | Todo state |
+|---|---|
+| Root agent | `:todo` events in shared session-trace |
+| Programmatic subagent | `:todo` events in own fresh session-trace |
 
 ### Task Status
 
-Babashka's task runner has no built-in status — it runs a task or it doesn't. Botashka adds status as a **derived property of session-trace**, not a stored field:
+Task status is a **derived property of session-trace**, not a stored field:
 
 ```clojure
 (defn task-status [session-trace task-name]
@@ -162,24 +140,7 @@ Status is a pure function of what already happened — it cannot be inconsistent
 | `:finished` | `:observe` seen |
 | `:error` | `:error` event seen for this task |
 
-For human display, `core.clj` writes `:status` into the published `bb.edn` after each task transition — derived from the trace, never stored as ground truth:
-
-```clojure
-{:tasks
- {fetch-notes {:doc    "Fetch HTML from target URL"
-               :status :finished
-               :task   (run-tool 'fetch-url {:url url})}
-  extract-ids {:doc     "Parse SAP note IDs from HTML"
-               :status  :in-progress
-               :depends [fetch-notes]
-               :task    (run-tool 'parse-sap-ids)}
-  save-csv    {:doc     "Write IDs to output.csv"
-               :status  :open
-               :depends [extract-ids]
-               :task    (run-tool 'write-csv)}}}
-```
-
-The trace is authoritative. The `:status` field in bb.edn is a convenience for humans reading the file — it is always overwritten from the trace on each update, never read back as ground truth.
+Human display is provided by `(b/tasks)` — a REPL helper that derives and prints the current todo state from the trace.
 
 ---
 
@@ -467,9 +428,8 @@ Each event type routes to its own pipeline:
 
 ```
 botashka/
-├── bb.edn                        ← published human window (derived from todo state, not authoritative)
 ├── src/
-│   ├── botashka/core.clj         ← start! loop, emit!, run-goal!, topo-sort, publish-bb-edn!, session-trace atom
+│   ├── botashka/core.clj         ← start!, emit!, run-goal!, topo-sort, session-trace atom
 │   ├── botashka/planner.clj      ← LLM → :todo event writer, plan-amend!
 │   ├── botashka/todo.clj         ← todo state derivation: current-todo, task-status pure fns
 │   ├── botashka/react.clj        ← ReAct loop (think/generate/execute/observe)
@@ -500,10 +460,10 @@ botashka/
 | Confirmation policy | `:confirm true` on `:shell` and `:llm-complete` | High-risk built-ins require `y/n` before execution; others run freely |
 | Tool selection | LLM reads index (built-ins + generated) | Keeps decision in one place, no embedding overhead |
 | Spec validation | Syntactic `re-find` for `s/def`/`s/fdef` + `sci/eval-string` | Avoids macro-interception issues; `clojure.spec.alpha` is natively available in Babashka SCI |
-| Planning substrate | Own todo system — `:todo`/`:todo-update` events in session-trace; `bb.edn` is a published human window | Babashka has no programmatic in-memory task API; rewriting a Babashka execution file on every LLM update is fragile and unnecessary |
-| Plan mutation | Two levels: lightweight `:todo-update` (no rewrite) and structural `plan-amend!` (new `:todo` event + `bb.edn` publish) | Fast updates don't need `bb.edn` rewrite; structural changes always produce an auditable `:plan-amend` event |
+| Planning substrate | Own todo system — `:todo`/`:todo-update` events in session-trace | Babashka has no programmatic in-memory task API; rewriting an external file on every LLM update is fragile and unnecessary |
+| Plan mutation | Two levels: lightweight `:todo-update` (status/notes only) and structural `plan-amend!` (new `:todo` event) | Fast updates are cheap; structural changes always produce an auditable `:plan-amend` event |
 | Dependency ordering | Topological sort on `:depends` in `core.clj` | Replaces Babashka's task runner at execution time; trivial to implement, no file I/O |
-| Task status | Derived from `session-trace` via `task-status` pure fn | Trace is authoritative; `:status` in bb.edn is display-only convenience |
+| Task status | Derived from `session-trace` via `task-status` pure fn | Trace is authoritative; `(b/tasks)` renders current state for human inspection |
 | Task output | Passed explicitly between tasks via session scratch (`sessions/<id>/scratch.edn`); executor writes result under task name key | Survives subprocess boundary; deterministic, inspectable, no dynamic var leakage |
 | Session persistence | Trace written to `sessions/<id>.edn` at session end | Plain EDN; replay and debug without a DB |
 | Runtime data structure | `session-trace` (append-only event vector) | Single source of truth for replay, debug, and context assembly |

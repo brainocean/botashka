@@ -18,7 +18,7 @@ model {
     }
 
     container core 'core.clj' {
-      description 'start! loop, emit! output seam, format-event, run-goal! (topo-sort + task iteration), @path file parsing, publish-bb-edn! (derives bb.edn from todo state at task-structure boundaries). Reads filesystem for @path tokens. Derives task :status from trace.'
+      description 'start! loop, emit! output seam, format-event, run-goal! (topo-sort + task iteration), @path file parsing. Reads filesystem for @path tokens. Derives task :status from trace.'
       technology 'Clojure / Babashka'
       style {
         color primary
@@ -26,7 +26,7 @@ model {
     }
 
     container planner 'planner.clj' {
-      description 'Decomposes user goal into ordered steps via LLM. Appends :todo event to session-trace. plan-amend! handles structural replanning: appends :plan-amend + new :todo event, triggers bb.edn publish.'
+      description 'Decomposes user goal into ordered steps via LLM. Appends :todo event to session-trace. plan-amend! handles structural replanning: appends :plan-amend + new :todo event to session-trace.'
       technology 'Clojure / Babashka'
       style {
         color green
@@ -34,7 +34,7 @@ model {
     }
 
     container react 'react.clj' {
-      description 'ReAct loop: THINK → GENERATE+VALIDATE → EXECUTE → OBSERVE. Dispatches to executor for generated tools or builtins for built-in tools. run-tasks! executes in-memory EDN task maps for subagents without writing bb.edn.'
+      description 'ReAct loop: THINK → GENERATE+VALIDATE → EXECUTE → OBSERVE. Dispatches to executor for generated tools or builtins for built-in tools. run-tasks! executes in-memory EDN task maps for subagents.'
       technology 'Clojure / Babashka'
       style {
         color green
@@ -71,15 +71,6 @@ model {
       style {
         shape cylinder
         color secondary
-      }
-    }
-
-    container bbEdn 'bb.edn' {
-      description 'Published human window — derived from todo state by core.clj at task-structure boundaries. Human can inspect, edit, and run tasks manually with bb <task-name>. Never read back by the agent as ground truth. Babashka task runner used as human-facing CLI only.'
-      technology 'EDN / Babashka tasks'
-      style {
-        shape storage
-        color sky
       }
     }
 
@@ -128,7 +119,7 @@ model {
 
   system filesystem 'Local Filesystem' {
     #external
-    description 'Local disk: source files read via @path syntax, tools/*.clj, tool-index.edn, bb.edn, sessions/*.edn persistence.'
+    description 'Local disk: source files read via @path syntax, tools/*.clj, tool-index.edn, sessions/*.edn persistence.'
     technology 'POSIX filesystem'
     style {
       shape storage
@@ -157,7 +148,6 @@ model {
   botashka.core -> botashka.planner 'plan!(goal, ctx)'
   botashka.core -> botashka.react 'react-step!(task, ctx)'
   botashka.core -> botashka.todoClj 'current-todo + topo-sort'
-  botashka.core -[writes]-> botashka.bbEdn 'publish-bb-edn! (derived from todo state)'
   botashka.core -[emits]-> botashka.repl 'emit!(event) including :ask for confirmations'
 
   botashka.planner -> botashka.llmContext 'llm-context(trace, :plan)'
