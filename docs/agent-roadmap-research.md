@@ -205,6 +205,23 @@ The first active feature SHOULD be `provider-probe`, followed strictly by `read-
 
 Only then choose whether controlled edits are worth the additional policy, preview, rollback, and verification complexity.
 
+### Component lifecycle milestones
+
+The agent runtime begins as functions over immutable run data. A component manager is unnecessary while the provider call, tool registry, and trace are scoped to one function invocation. Introduce a component manager only when at least two long-lived resources have dependency and stop-order requirements—for example a persistent provider client plus trace store, or an event publisher plus TUI runtime.
+
+| Future capability | Domain | First lifecycle-managed component(s) | Required lifecycle proof |
+| --- | --- | --- | --- |
+| Persisted run trace / resume | Run observation | run store | A fresh REPL can inspect a completed run; partial writes do not present as completed runs. |
+| Real-time TUI / Phoenix / OTLP | Run observation, Interaction | event publisher | Events reach more than one consumer in order; shutdown drains or explicitly records undelivered events. |
+| Streaming or pooled provider calls | Provider integration | provider client | In-flight calls can be cancelled and resources close without corrupting run state. |
+| Long task pause/resume | Task control, Context management | task controller, context store | Task snapshot restores with the same workspace, limits, and required conversation facts. |
+| First approved mutation | Mutation workflow | mutation executor | Temporary resources are removed on failed apply; verification result is traceable. |
+| MCP / external connectors | Tool discovery | connector manager | Connector start/stop refreshes catalog without leaking connections or silently changing a running registry. |
+| Concurrent independent reads | Tool execution, Workflow orchestration | executor/scheduler only if needed | Trace retains deterministic per-call identity and defined aggregation/cancellation semantics. |
+| Graph/delegated workflow | Workflow orchestration | workflow engine | Each worker has declared inputs, output ownership, terminal states, and clean shutdown. |
+
+When that threshold is reached, evaluate **Component + reloaded.repl**, **Integrant + integrant-repl**, and **Mount** against the concrete dependency graph. The selection criterion is reload/reset clarity and explicit lifecycle ownership—not library popularity. This follows the reloaded-workflow framing in [Promesante’s overview](https://promesante.github.io/2021/04/28/clojure_repl_driven_development_part_1.html), which identifies those three ecosystems as common Clojure state-manager choices.
+
 ## Source index
 
 - ZenoAGI, “[Build a Minimal Agent from Scratch](https://ai.zenoagi.com/agent/practice/build-your-own)” — supplied tutorial and its v0–v3 progression.
