@@ -1,6 +1,7 @@
 (ns botashka.scratch
   (:require [botashka.agent :as agent]
             [botashka.provider :as provider]
+            [botashka.tools :as tools]
             [cheshire.core :as json]))
 
 (comment
@@ -74,6 +75,12 @@
                                               :additionalProperties false}}}
              :run (fn [{:keys [left right]}]
                     {:result (+ left right)})}}})
+
+  (agent/run!
+   {:system "Use the file tools to answer questions about the workspace."
+    :prompt "Read README.md and state its exact title."
+    :tools (tools/read-only-registry ".")})
+
 
 
 
