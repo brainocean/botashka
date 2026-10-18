@@ -6,18 +6,22 @@
 
 (comment
 
+  ;; Reload the agent namespace after editing src/botashka/agent.clj.
   (require 'botashka.agent :reload)
 
+  ;; Probe a plain OpenAI-compatible completion and inspect its raw response.
   (provider/complete!
     {:system "You are concise."
      :messages [{:role "user"
                  :content "Reply with exactly: pong."}]})
 
+  ;; Extract only the first assistant text plus completion metadata.
   (provider/complete-text!
     {:system "You are concise."
      :messages [{:role "user"
                  :content "Reply with exactly: pong."}]})
 
+  ;; Force the provider to return a calculator tool call; inspect its raw protocol shape.
   (provider/complete!
     {:messages [{:role "user"
                  :content "What is 2 plus 3? Use the calculator."}]
@@ -32,6 +36,7 @@
      :tool-choice {:type "function"
                    :function {:name "calculator"}}})
 
+  ;; Manually complete one tool round trip: parse arguments, calculate, send the result back.
   (let [tools [{:type "function"
                 :function {:name "calculator"
                            :description "Adds two integers."
@@ -61,6 +66,7 @@
                   :content (str tool-result)}]
       :tools tools}))
 
+  ;; Run the bounded agent loop with an in-process calculator tool.
   (agent/run!
    {:system "Use the calculator for arithmetic questions."
     :prompt "What is 2 plus 3?"
@@ -76,11 +82,13 @@
              :run (fn [{:keys [left right]}]
                     {:result (+ left right)})}}})
 
+  ;; Answer a real workspace question through list/read file tools.
   (agent/run!
    {:system "Use the file tools to answer questions about the workspace."
     :prompt "Read README.md and state its exact title."
     :tools (tools/read-only-registry ".")})
 
+  ;; Inspect the structured execution trace of the workspace agent run.
   (-> (agent/run!
        {:system "Use the file tools to answer questions about the workspace."
         :prompt "Read README.md and state its exact title."
