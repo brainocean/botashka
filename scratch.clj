@@ -2,6 +2,9 @@
   (:require [botashka.provider :as provider]))
 
 (comment
+
+  (require 'botashka.provider :reload)
+
   (provider/complete!
     {:system "You are concise."
      :messages [{:role "user"
