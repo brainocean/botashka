@@ -1,5 +1,6 @@
 (ns botashka.scratch
-  (:require [botashka.provider :as provider]
+  (:require [botashka.agent :as agent]
+            [botashka.provider :as provider]
             [cheshire.core :as json]))
 
 (comment
@@ -58,6 +59,22 @@
                   :tool_call_id (:id tool-call)
                   :content (str tool-result)}]
       :tools tools}))
+
+  (agent/run!
+   {:system "Use the calculator for arithmetic questions."
+    :prompt "What is 2 plus 3?"
+    :tools {"calculator"
+            {:schema {:type "function"
+                      :function {:name "calculator"
+                                 :description "Adds two integers."
+                                 :parameters {:type "object"
+                                              :properties {:left {:type "integer"}
+                                                           :right {:type "integer"}}
+                                              :required ["left" "right"]
+                                              :additionalProperties false}}}
+             :run (fn [{:keys [left right]}]
+                    {:result (+ left right)})}}})
+
 
 
 
