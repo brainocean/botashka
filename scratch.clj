@@ -95,6 +95,13 @@
         :tools (tools/read-only-registry ".")})
       :trace)
 
+  ;; Recover from a missing file by listing the workspace and reading the actual README.
+  (agent/run!
+   {:system "Use file tools. If a file is missing, inspect the directory and recover."
+    :prompt "Read the project title from README.txt."
+    :tools (tools/read-only-registry ".")})
+
+
 
 
 

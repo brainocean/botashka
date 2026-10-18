@@ -29,15 +29,29 @@
   [tool-call]
   (json/parse-string (get-in tool-call [:function :arguments]) true))
 
+(defn- tool-name
+  [tool-call]
+  (get-in tool-call [:function :name]))
+
 (defn- find-tool
   [tool-call tools]
-  (get tools (get-in tool-call [:function :name])))
+  (get tools (tool-name tool-call)))
+
+(defn- tool-error
+  [kind tool-call error]
+  {:error {:kind kind
+           :tool (tool-name tool-call)
+           :message (.getMessage error)}})
 
 (defn- run-tool
-  [tool-call tools]
+  [tool-call arguments tools]
   (if-let [tool (find-tool tool-call tools)]
-    ((:run tool) (parse-tool-arguments tool-call))
-    {:error (str "Unknown tool: " (get-in tool-call [:function :name]))}))
+    (try
+      ((:run tool) arguments)
+      (catch Exception error
+        (tool-error :tool-failed tool-call error)))
+    {:error {:kind :unknown-tool
+             :tool (tool-name tool-call)}}))
 
 (defn- tool-result-message
   [tool-call result]
@@ -63,11 +77,17 @@
 
 (defn- execute-tool-call
   [turn tool-call tools]
-  (let [arguments (parse-tool-arguments tool-call)
-        result (run-tool tool-call tools)]
-    {:message (tool-result-message tool-call result)
-     :events [(tool-call-event turn tool-call arguments)
-              (tool-result-event turn tool-call result)]}))
+  (try
+    (let [arguments (parse-tool-arguments tool-call)
+          result (run-tool tool-call arguments tools)]
+      {:message (tool-result-message tool-call result)
+       :events [(tool-call-event turn tool-call arguments)
+                (tool-result-event turn tool-call result)]})
+    (catch Exception error
+      (let [result (tool-error :invalid-arguments tool-call error)]
+        {:message (tool-result-message tool-call result)
+         :events [(tool-call-event turn tool-call nil)
+                  (tool-result-event turn tool-call result)]}))))
 
 (defn- add-tool-results
   [turn messages assistant-message tool-calls tools]
