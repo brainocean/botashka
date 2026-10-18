@@ -6,7 +6,7 @@
 
 (comment
 
-  (require 'botashka.provider :reload)
+  (require 'botashka.agent :reload)
 
   (provider/complete!
     {:system "You are concise."
@@ -80,6 +80,13 @@
    {:system "Use the file tools to answer questions about the workspace."
     :prompt "Read README.md and state its exact title."
     :tools (tools/read-only-registry ".")})
+
+  (-> (agent/run!
+       {:system "Use the file tools to answer questions about the workspace."
+        :prompt "Read README.md and state its exact title."
+        :tools (tools/read-only-registry ".")})
+      :trace)
+
 
 
 
