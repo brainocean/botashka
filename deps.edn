@@ -1,0 +1,9 @@
+{:paths ["src"]
+
+ :deps {babashka/fs {:mvn/version "0.5.34"}
+        babashka/process {:mvn/version "0.6.25"}
+        cheshire/cheshire {:mvn/version "6.2.0"}
+        org.babashka/http-client {:mvn/version "0.4.25"}}
+
+ :aliases
+ {:repl {:main-opts ["-e" "(require 'botashka.agent 'botashka.provider 'botashka.tools)"]}}}

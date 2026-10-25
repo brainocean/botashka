@@ -1,6 +1,7 @@
 (ns botashka.scratch
   (:require [botashka.agent :as agent]
             [botashka.provider :as provider]
+            [botashka.tool-runtime :as tool-runtime]
             [botashka.tools :as tools]
             [cheshire.core :as json]))
 
@@ -100,6 +101,12 @@
    {:system "Use file tools. If a file is missing, inspect the directory and recover."
     :prompt "Read the project title from README.txt."
     :tools (tools/read-only-registry ".")})
+
+  ;; Run the read-file code artifact as a separate Babashka process.
+  (tool-runtime/run! "tools/read-file.clj"
+                     {:workspace "."
+                      :path "README.md"})
+
 
 
 

@@ -1,5 +1,6 @@
 (ns botashka.tools
-  (:require [babashka.fs :as fs]))
+  (:require [babashka.fs :as fs]
+            [botashka.tool-runtime :as tool-runtime]))
 
 (def ^:private max-file-characters 12000)
 
@@ -24,13 +25,6 @@
       {:error {:kind :not-a-directory
                :path path}})))
 
-(defn- read-file
-  [workspace {:keys [path]}]
-  (let [file (workspace-path workspace path)]
-    (if (fs/regular-file? file)
-      {:content (subs (slurp (str file)) 0 (min max-file-characters (fs/size file)))}
-      {:error {:kind :file-not-found
-               :path path}})))
 
 (defn read-only-registry
   "Returns workspace-confined list-files and read-file tool definitions."
@@ -53,4 +47,6 @@
                                      :properties {:path {:type "string"}}
                                      :required ["path"]
                                      :additionalProperties false}}}
-    :run #(read-file workspace %)}})
+    :run #(tool-runtime/run! "tools/read-file.clj"
+                             {:workspace workspace
+                              :path (:path %)})}})
