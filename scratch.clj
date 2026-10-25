@@ -87,20 +87,20 @@
   (agent/run!
    {:system "Use the file tools to answer questions about the workspace."
     :prompt "Read README.md and state its exact title."
-    :tools (tools/read-only-registry ".")})
+    :tools (tools/code-tool-registry ".")})
 
   ;; Inspect the structured execution trace of the workspace agent run.
   (-> (agent/run!
        {:system "Use the file tools to answer questions about the workspace."
         :prompt "Read README.md and state its exact title."
-        :tools (tools/read-only-registry ".")})
+        :tools (tools/code-tool-registry ".")})
       :trace)
 
   ;; Recover from a missing file by listing the workspace and reading the actual README.
   (agent/run!
    {:system "Use file tools. If a file is missing, inspect the directory and recover."
     :prompt "Read the project title from README.txt."
-    :tools (tools/read-only-registry ".")})
+    :tools (tools/code-tool-registry ".")})
 
   ;; Run the read-file code artifact as a separate Babashka process.
   (tool-runtime/run! "tools/read-file.clj"
