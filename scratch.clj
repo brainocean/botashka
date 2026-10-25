@@ -7,35 +7,37 @@
 
 (comment
 
-  ;; Reload the agent namespace after editing src/botashka/agent.clj.
+  ;; Reload changed namespaces in dependency order before running explorations.
+  (require 'botashka.tool-runtime :reload)
+  (require 'botashka.tools :reload)
   (require 'botashka.agent :reload)
 
   ;; Probe a plain OpenAI-compatible completion and inspect its raw response.
   (provider/complete!
-    {:system "You are concise."
-     :messages [{:role "user"
-                 :content "Reply with exactly: pong."}]})
+   {:system "You are concise."
+    :messages [{:role "user"
+                :content "Reply with exactly: pong."}]})
 
   ;; Extract only the first assistant text plus completion metadata.
   (provider/complete-text!
-    {:system "You are concise."
-     :messages [{:role "user"
-                 :content "Reply with exactly: pong."}]})
+   {:system "You are concise."
+    :messages [{:role "user"
+                :content "Reply with exactly: pong."}]})
 
   ;; Force the provider to return a calculator tool call; inspect its raw protocol shape.
   (provider/complete!
-    {:messages [{:role "user"
-                 :content "What is 2 plus 3? Use the calculator."}]
-     :tools [{:type "function"
-              :function {:name "calculator"
-                         :description "Adds two integers."
-                         :parameters {:type "object"
-                                      :properties {:left {:type "integer"}
-                                                   :right {:type "integer"}}
-                                      :required ["left" "right"]
-                                      :additionalProperties false}}}]
-     :tool-choice {:type "function"
-                   :function {:name "calculator"}}})
+   {:messages [{:role "user"
+                :content "What is 2 plus 3? Use the calculator."}]
+    :tools [{:type "function"
+             :function {:name "calculator"
+                        :description "Adds two integers."
+                        :parameters {:type "object"
+                                     :properties {:left {:type "integer"}
+                                                  :right {:type "integer"}}
+                                     :required ["left" "right"]
+                                     :additionalProperties false}}}]
+    :tool-choice {:type "function"
+                  :function {:name "calculator"}}})
 
   ;; Manually complete one tool round trip: parse arguments, calculate, send the result back.
   (let [tools [{:type "function"
@@ -108,14 +110,4 @@
                       :path "README.md"})
 
   ;; Discover each code tool's schema from its self-described metadata.
-  (tools/code-tool-registry ".")
-
-
-
-
-
-
-
-
-
-  )
+  (tools/code-tool-registry "."))
