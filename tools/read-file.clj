@@ -5,6 +5,14 @@
 
 (def ^:private max-file-characters 12000)
 
+(def metadata
+  {:name "read_file"
+   :description "Reads text from a workspace-relative file path."
+   :parameters {:type "object"
+                :properties {:path {:type "string"}}
+                :required ["path"]
+                :additionalProperties false}})
+
 (defn- workspace-path
   [workspace path]
   (let [workspace (fs/canonicalize workspace)
@@ -23,8 +31,7 @@
       {:error {:kind :file-not-found
                :path path}})))
 
-(-> *in*
-    slurp
-    edn/read-string
-    run
-    prn)
+(let [input (-> *in* slurp edn/read-string)]
+  (if (= :describe (:command input))
+    (prn metadata)
+    (-> input run prn)))

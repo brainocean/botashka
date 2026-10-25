@@ -23,3 +23,8 @@
                :program program
                :exit exit
                :stderr err}})))
+
+(defn describe!
+  "Reads a code tool's self-described provider metadata."
+  [program]
+  (run! program {:command :describe}))

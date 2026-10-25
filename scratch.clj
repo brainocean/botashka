@@ -107,6 +107,10 @@
                      {:workspace "."
                       :path "README.md"})
 
+  ;; Discover each code tool's schema from its self-described metadata.
+  (tools/code-tool-registry ".")
+
+
 
 
 
