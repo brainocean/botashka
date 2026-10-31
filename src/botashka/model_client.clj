@@ -1,4 +1,4 @@
-(ns botashka.provider
+(ns botashka.model-client
   (:require [babashka.http-client :as http]
             [cheshire.core :as json]))
 
@@ -19,10 +19,10 @@
       tool-choice (assoc :tool_choice tool-choice))))
 
 (defn complete!
-  "Sends an OpenAI-compatible Chat Completions request and returns the decoded body.
+  "Sends one OpenAI-compatible model request and returns the decoded response.
 
-   Input messages use OpenAI roles and string content. The caller owns any
-   normalization of the provider response."
+   Input messages use OpenAI roles and string content. The caller owns
+   model-response normalization and agent decision logic."
   [request]
   (let [response (http/post (str base-url "/chat/completions")
                             {:headers {"authorization" (str "Bearer " (api-key))

@@ -2,6 +2,11 @@
   (:require [botashka.agent :as agent]
             [clojure.test :refer [deftest is testing]]))
 
+(defn- test-command-executor
+  [complete! clock]
+  (agent/command-executor {:complete! complete!
+                           :clock clock}))
+
 (deftest agent-run-emits-normalized-terminal-log
   (let [times (atom ["2026-10-31T10:00:00Z"
                      "2026-10-31T10:00:01Z"
@@ -11,10 +16,11 @@
         clock #(let [time (first @times)]
                  (swap! times rest)
                  time)
-        result (agent/run! {:complete! (constantly {:model "test-model"
-                                                    :choices [{:finish_reason "stop"
-                                                               :message {:content "pong"}}]})
-                            :clock clock
+        result (agent/run! {:command-executor! (test-command-executor
+                                                (constantly {:model "test-model"
+                                                             :choices [{:finish_reason "stop"
+                                                                        :message {:content "pong"}}]})
+                                                clock)
                             :run-id "run-456"
                             :system "Reply concisely."
                             :prompt "ping"
@@ -24,18 +30,19 @@
            (mapv :seq (:log result))))
     (is (= [:run-started
             :user-submitted
-            :provider-requested
-            :provider-responded
+            :model-requested
+            :model-responded
             :run-finished]
            (mapv :type (:log result))))
     (is (= "run-456" (:run-id (first (:log result)))))
     (is (= :completed (get-in (last (:log result)) [:data :status])))))
 
 (deftest agent-run-keeps-graded-local-evidence
-  (let [result (agent/run! {:complete! (constantly {:model "test-model"
-                                                    :choices [{:finish_reason "stop"
-                                                               :message {:content "pong"}}]})
-                            :clock (constantly "2026-10-31T10:00:00Z")
+  (let [result (agent/run! {:command-executor! (test-command-executor
+                                                (constantly {:model "test-model"
+                                                             :choices [{:finish_reason "stop"
+                                                                        :message {:content "pong"}}]})
+                                                (constantly "2026-10-31T10:00:00Z"))
                             :run-id "run-789"
                             :system "Reply concisely."
                             :prompt "private prompt"
@@ -45,12 +52,14 @@
     (is (= {:final-answer "pong"}
            (:evidence (last (:log result)))))))
 
-(deftest agent-run-uses-injected-provider
+(deftest agent-run-uses-injected-model-client
   (let [requests (atom [])
-        result (agent/run! {:complete! #(do (swap! requests conj %)
-                                            {:model "test-model"
-                                             :choices [{:finish_reason "stop"
-                                                        :message {:content "pong"}}]})
+        result (agent/run! {:command-executor! (test-command-executor
+                                                #(do (swap! requests conj %)
+                                                     {:model "test-model"
+                                                      :choices [{:finish_reason "stop"
+                                                                 :message {:content "pong"}}]})
+                                                (constantly "2026-10-31T10:00:00Z"))
                             :system "Reply concisely."
                             :prompt "ping"
                             :tools {}})]
@@ -60,7 +69,7 @@
              :tools []}]
            @requests))))
 
-(deftest run-state-machine-decides-provider-command-from-events
+(deftest run-state-machine-decides-model-command-from-events
   (let [run (-> (agent/new-run {:run-id "run-state"
                                 :system "Reply concisely."
                                 :tools {}
@@ -73,13 +82,13 @@
                                     :user-submitted
                                     {:characters 4}
                                     {:prompt "ping"}))]
-    (is (= {:command :provider/complete
+    (is (= {:command :model/complete
             :request {:system "Reply concisely."
                       :messages [{:role "user" :content "ping"}]
                       :tools []}}
-           (agent/next-command run)))))
+           (agent/model-driver run)))))
 
-(deftest provider-response-event-derives-terminal-run-state
+(deftest model-response-event-derives-terminal-run-state
   (let [run (-> (agent/new-run {:run-id "run-terminal"
                                 :system "Reply concisely."
                                 :tools {}
@@ -93,17 +102,35 @@
                                     {:characters 4}
                                     {:prompt "ping"})
                 (agent/append-event "2026-10-31T10:00:02Z"
-                                    :provider-requested
+                                    :model-requested
                                     {:turn 0}
                                     nil)
                 (agent/append-event "2026-10-31T10:00:03Z"
-                                    :provider-responded
+                                    :model-responded
                                     {:turn 0 :finish-reason "stop" :tool-call-count 0}
                                     {:assistant-message {:role "assistant"
                                                          :content "pong"}}))]
     (is (= :ready-to-finish (:status run)))
     (is (= {:command :run/finish}
-           (agent/next-command run)))
+           (agent/model-driver run)))
     (is (= [{:role "user" :content "ping"}
             {:role "assistant" :content "pong"}]
            (:messages run)))))
+(deftest agent-run-uses-injected-driver
+  (let [driver-calls (atom [])
+        result (agent/run! {:next-command #(do (swap! driver-calls conj (:status %))
+                                               (case (:status %)
+                                                 :awaiting-model {:command :run/finish}
+                                                 nil))
+                            :command-executor! (test-command-executor
+                                                (fn [_]
+                                                  (throw (ex-info "Model client must not run" {})))
+                                                (constantly "2026-10-31T10:00:00Z"))
+                            :run-id "run-driver"
+                            :system "ignored"
+                            :prompt "ping"
+                            :tools {}})]
+    (is (= [:awaiting-model :finished] @driver-calls))
+    (is (= :completed (:status result)))
+    (is (= [:run-started :user-submitted :run-finished]
+           (mapv :type (:log result))))))

@@ -2,13 +2,13 @@
 
 ## 问题
 
-当前 `botashka.agent` 在多个私有函数中构造并拼接 `:log` vector：用户输入、provider response、tool call/result、final answer、step limit 各自决定 event shape 和 append 时机。它能完成 REPL probe，却没有一个 run-event-log owner，也没有统一的 event envelope、evidence policy、时间/耗时、发布或未来 exporter 的位置。
+当前 `botashka.agent` 曾在多个私有函数中构造并拼接 `:log` vector：用户输入、模型 response、tool call/result、final answer、step limit 各自决定 event shape 和 append 时机。它能完成 REPL probe，却没有一个 run-event-log owner，也没有统一的 event envelope、evidence policy、时间/耗时、发布或未来 exporter 的位置。
 
 这会阻碍后续工作：
 
 - 持久化时不知道哪个位置必须原子追加；
 - 终端、文件、OTel、Phoenix UI 等消费者会迫使 `agent` 知道更多输出机制；
-- provider/tool 的时间、失败和取消只能零散地补；
+- model/tool 的时间、失败和取消只能零散地补；
 - event schema 演进会散落到 control-flow functions；
 - 直接把 OpenTelemetry SDK、span 或 Prometheus labels 混进 agent loop，会将可观测性失败变成 agent failure。
 
@@ -26,7 +26,7 @@ flowchart LR
   E -. projection .-> O[Terminal / file store / OTel]
 ```
 
-事件是已发生的 host facts；命令是尚未执行的意图；状态是由事件纯派生的 read model。shell 只执行 `next-command` 返回的一个 effect，并将观察到的结果追加为下一个 event。provider、tool、clock 与 ID generation 都在 shell，不能进入 pure transition。
+事件是已发生的 host facts；命令是尚未执行的意图；状态是由事件纯派生的 read model。**Driver** 从 state 产生唯一允许的 command；shell 只执行该 command，并将观察到的结果追加为下一个 event。model client、tool、clock 与 ID generation 都在 shell，不能进入 pure transition。
 
 ## 纯 core interface
 
@@ -37,15 +37,15 @@ flowchart LR
 | `new-run` | 从显式 options 构造 unstarted run | 纯 |
 | `append-event` | envelope event、追加 events、应用 transition | 纯 |
 | `apply-event` | `run + event -> next-run` | 纯 |
-| `next-command` | 从 derived state 决定唯一允许的下一条 command | 纯 |
-| `provider-request` | 将 conversation 与 registry 变为 provider request | 纯 |
-| `run!` | 解释 command、调用 provider/tool、取得时间与 ID | 非纯 shell |
+| `model-driver` | 默认 model-driven driver；从 state 决定唯一 command | 纯 |
+| injected `:next-command` | 可替代 driver，允许 deterministic control logic | 纯 |
+| `run!` | 解释 command、调用 model client/tool、取得时间与 ID | 非纯 shell |
 
 `run` 的最小状态：
 
 ```clojure
 {:id "run-..."
- :status :awaiting-provider
+ :status :awaiting-model
  :turn 0
  :messages [...]
  :pending-tool-calls [...]
@@ -74,8 +74,8 @@ flowchart LR
 ```text
 :run-started
 :user-submitted
-:provider-requested
-:provider-responded
+:model-requested
+:model-responded
 :tool-proposed
 :tool-result
 :limit-reached
@@ -85,19 +85,19 @@ flowchart LR
 第一批命令：
 
 ```clojure
-{:command :provider/complete :request ...}
+{:command :model/complete :request ...}
 {:command :tool/execute :tool-call ...}
 {:command :run/limit}
 {:command :run/finish}
 ```
 
-命令不是 event。shell 完成或失败后才追加对应事实；不能在 provider/tool 执行前伪造 `:provider-responded` 或 `:tool-result`。
+命令不是 event。shell 完成或失败后才追加对应事实；不能在 model/tool 执行前伪造 `:model-responded` 或 `:tool-result`。
 
 ## Conversation 与 context
 
-provider-compatible `:messages` 是纯 run state 的派生部分。`apply-event` 根据 `:user-submitted` evidence、`:provider-responded` 中的 assistant message 与 `:tool-result` 中的 tool message 重建它。
+model-protocol `:messages` 是纯 run state 的派生部分。`apply-event` 根据 `:user-submitted` evidence、`:model-responded` 中的 assistant message 与 `:tool-result` 中的 tool message 重建它。
 
-当前下一次 LLM request 使用该 conversation。未来 context management 可以从 run events 的 `:data` 选择已脱敏事实，但不得默认把完整 event log 或 `:evidence` 注入 prompt。
+当前下一次 model request 使用该 conversation。未来 context management 可以从 run events 的 `:data` 选择已脱敏事实，但不得默认把完整 event log 或 `:evidence` 注入 prompt。
 
 ## Observation 与持久化
 

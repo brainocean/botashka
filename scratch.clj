@@ -1,6 +1,6 @@
 (ns botashka.scratch
   (:require [botashka.agent :as agent]
-            [botashka.provider :as provider]
+            [botashka.model-client :as model-client]
             [botashka.tool-runtime :as tool-runtime]
             [botashka.tools :as tools]
             [cheshire.core :as json]))
@@ -8,24 +8,25 @@
 (comment
 
   ;; Reload changed namespaces in dependency order before running explorations.
+  (require 'botashka.model-client :reload)
   (require 'botashka.tool-runtime :reload)
   (require 'botashka.tools :reload)
   (require 'botashka.agent :reload)
 
   ;; Probe a plain OpenAI-compatible completion and inspect its raw response.
-  (provider/complete!
+  (model-client/complete!
    {:system "You are concise."
     :messages [{:role "user"
                 :content "Reply with exactly: pong."}]})
 
   ;; Extract only the first assistant text plus completion metadata.
-  (provider/complete-text!
+  (model-client/complete-text!
    {:system "You are concise."
     :messages [{:role "user"
                 :content "Reply with exactly: pong."}]})
 
   ;; Force the provider to return a calculator tool call; inspect its raw protocol shape.
-  (provider/complete!
+  (model-client/complete!
    {:messages [{:role "user"
                 :content "What is 2 plus 3? Use the calculator."}]
     :tools [{:type "function"
@@ -50,7 +51,7 @@
                                         :additionalProperties false}}}]
         user-message {:role "user"
                       :content "What is 2 plus 3? Use the calculator."}
-        first-response (provider/complete!
+        first-response (model-client/complete!
                         {:messages [user-message]
                          :tools tools
                          :tool-choice {:type "function"
@@ -61,7 +62,7 @@
                               (get-in tool-call [:function :arguments])
                               true)
         tool-result (+ left right)]
-    (provider/complete!
+    (model-client/complete!
      {:messages [user-message
                  assistant-message
                  {:role "tool"

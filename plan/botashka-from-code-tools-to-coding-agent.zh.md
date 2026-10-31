@@ -10,14 +10,14 @@ Pi 是设计证据，不是实现目标。详细分析见 [`docs/pi-capability-a
 
 已完成：
 
-- `botashka.agent/run!` 是顺序 OpenAI-compatible Chat Completions tool loop，默认上限八 turns。
-- `botashka.provider/complete!` 隔离当前 HTTP/provider protocol。
+- `botashka.agent/run!` 是顺序、event-driven state machine；`model-driver` 是默认的 pure driver，亦可注入 deterministic driver。
+- `botashka.model-client/complete!` 隔离当前 OpenAI-compatible model HTTP protocol。
 - `tools/read-file.clj`、`tools/list-files.clj` 是独立 artifacts，遵守 EDN stdin/stdout contract。
 - artifact 对 `{:command :describe}` 返回 tool name、description 与 JSON-shaped parameter schema。
 - `botashka.tools/code-tool-registry` 发现 `tools/*.clj`，读取 metadata，并用 `botashka.tool-runtime` 以 `bb` subprocess 执行。
 - agent 已能在文件缺失后列出 workspace，再读取正确文件。
 
-当前缺口：metadata 与 arguments 尚未由 host 验证；tool process 没有 host-enforced deadline/output cap；trace 只存在内存；没有 CLI、cancellation、明确 provider-error terminal result、fake provider seam；也没有 mutation policy、preview/approval、patch application 与 verification。
+当前缺口：metadata 与 arguments 尚未由 host 验证；tool process 没有 host-enforced deadline/output cap；run event log 只存在内存；没有 CLI、cancellation、明确 model-error terminal result、或持久化 run store；也没有 mutation policy、preview/approval、patch application 与 verification。
 
 ## v1 产品边界
 
@@ -41,11 +41,12 @@ Pi 是设计证据，不是实现目标。详细分析见 [`docs/pi-capability-a
 
 | Module | Interface | 负责隐藏的复杂性 | 初始 adapter |
 | --- | --- | --- | --- |
-| `provider` | `complete(request) -> completion or provider failure` | HTTP、credentials、timeout/error classification | 现有 OpenAI-compatible endpoint |
+| `model-client` | `complete!(request) -> model response` | HTTP、credentials、timeout/error classification | 现有 OpenAI-compatible endpoint |
+| `driver` | `run -> command-or-nil` | 下一步决策策略 | `model-driver`；未来 deterministic driver |
 | `tool-runtime` | `describe(program)`、`invoke(program,input,limits)` | subprocess、EDN protocol、deadline、output limits、failure conversion | `bb` subprocess |
-| `tool-registry` | `discover(tool-dir)`、`validate(call)`、`execute(call,context)` | metadata/argument/output validation、duplicate name、lookup | `tools/*.clj` |
+| `tool-registry` | `discover(tool-dir) -> registry`, `validate(call)`, `execute(call, context)` | metadata/argument/output validation、duplicate name、lookup | `tools/*.clj` |
 | `policy` | `decide(proposed-call,run) -> :allow/:ask/:deny` | capability class、workspace restriction、approval state | read-only allow；其他 deny |
-| `run` | `run(options) -> terminal-result` | conversation、limits、terminal transition、trace facts | 重构现有 synchronous loop |
+| `run` | `run(options) -> terminal-result` | event transition、command execution、limits、terminal transition | event-driven `botashka.agent/run!` |
 | `trace-store` | `start!`、`append!`、`finish!` | run ID、atomic append、redaction、result file | 每个 run 一个目录 |
 | `cli` | args/stdin -> terminal result/rendered output | workspace resolution、human confirmation、exit code | Babashka command |
 | `mutation` | `propose`、`approve`、`apply`、`verify` | patch identity、preview、approved application、rollback | workspace 内 unified diff |

@@ -6,4 +6,4 @@
         org.babashka/http-client {:mvn/version "0.4.25"}}
 
  :aliases
- {:repl {:main-opts ["-e" "(require 'botashka.agent 'botashka.provider 'botashka.tools)"]}}}
+ {:repl {:main-opts ["-e" "(require 'botashka.agent 'botashka.model-client 'botashka.tools)"]}}}

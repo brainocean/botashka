@@ -1,12 +1,12 @@
 (ns botashka.agent
   (:refer-clojure :exclude [run!])
-  (:require [botashka.provider :as provider]
+  (:require [botashka.model-client :as model-client]
             [cheshire.core :as json])
   (:import [java.time Instant]
            [java.util UUID]))
 
-(defn- provider-request
-  "Builds the provider request from the current derived conversation and tools."
+(defn- model-request
+  "Builds the model request from the current derived conversation and tools."
   [run]
   {:system (:system run)
    :messages (:messages run)
@@ -26,7 +26,7 @@
    :pending-tool-calls []})
 
 (defn- assistant-message
-  "Extracts the first assistant message from a provider completion."
+  "Extracts the first assistant message from a model completion."
   [response]
   (get-in response [:choices 0 :message]))
 
@@ -36,7 +36,7 @@
   (:tool_calls assistant-message))
 
 (defn- tool-name
-  "Returns the provider name requested by a tool call."
+  "Returns the tool name requested by a tool call."
   [tool-call]
   (get-in tool-call [:function :name]))
 
@@ -53,9 +53,9 @@
     :user-submitted (-> run
                         (update :messages conj {:role "user"
                                                 :content (:prompt evidence)})
-                        (assoc :status :awaiting-provider))
-    :provider-requested (assoc run :status :awaiting-provider-response)
-    :provider-responded
+                        (assoc :status :awaiting-model))
+    :model-requested (assoc run :status :awaiting-model-response)
+    :model-responded
     (let [message (:assistant-message evidence)
           tool-calls (requested-tool-calls message)]
       (cond-> (-> run
@@ -75,7 +75,7 @@
                   (assoc :pending-tool-calls pending-tool-calls
                          :turn next-turn))
         (seq pending-tool-calls) (assoc :status :awaiting-tools)
-        (empty? pending-tool-calls) (assoc :status :awaiting-provider)))
+        (empty? pending-tool-calls) (assoc :status :awaiting-model)))
     :limit-reached (assoc run :status :ready-to-finish
                           :terminal-status :step-limit)
     :run-finished (assoc run :status :finished
@@ -95,21 +95,21 @@
         (update :events conj event)
         (apply-event event))))
 
-(defn next-command
-  "Purely decides the one permitted next command for the current run state."
+(defn model-driver
+  "Purely chooses the next command for a run driven by model completions."
   [run]
   (case (:status run)
-    :awaiting-provider (if (= (:turn run) (:max-turns run))
-                         {:command :run/limit}
-                         {:command :provider/complete
-                          :request (provider-request run)})
+    :awaiting-model (if (= (:turn run) (:max-turns run))
+                      {:command :run/limit}
+                      {:command :model/complete
+                       :request (model-request run)})
     :awaiting-tools {:command :tool/execute
                      :tool-call (first (:pending-tool-calls run))}
     :ready-to-finish {:command :run/finish}
     nil))
 
 (defn- parse-tool-arguments
-  "Decodes a provider tool call's JSON arguments into EDN."
+  "Decodes a model tool call's JSON arguments into EDN."
   [tool-call]
   (json/parse-string (get-in tool-call [:function :arguments]) true))
 
@@ -132,7 +132,7 @@
              :tool (tool-name tool-call)}}))
 
 (defn- tool-result-message
-  "Builds the provider-compatible message for one tool result."
+  "Builds the model-compatible message for one tool result."
   [tool-call result]
   {:role "tool"
    :tool_call_id (:id tool-call)
@@ -143,80 +143,122 @@
   [result]
   (if (:error result) :error :ok))
 
-(defn- append-observed-event!
-  "Reads the shell clock and appends one observed event to an immutable run."
+(defn- append-observed-event
+  "Appends one observed event using the executor-owned clock."
   [run clock type data evidence]
   (append-event run (clock) type data evidence))
 
-(defn- execute-tool-command!
+(defn- append-observed-events
+  "Appends observed event descriptions in order with executor-owned timestamps."
+  [run clock events]
+  (reduce (fn [run {:keys [type data evidence]}]
+            (append-observed-event run clock type data evidence))
+          run
+          events))
+
+(defn- execute-tool-command
   "Executes one tool command and appends its observed proposal and result events."
   [run clock tool-call]
   (try
     (let [arguments (parse-tool-arguments tool-call)
           tool (tool-name tool-call)
-          run (append-observed-event! run clock :tool-proposed
-                                      {:turn (:turn run)
+          run (append-observed-event run clock :tool-proposed
+                                     {:turn (:turn run)
+                                      :call-id (:id tool-call)
+                                      :tool tool
+                                      :argument-keys (sort (map name (keys arguments)))}
+                                     {:arguments arguments})
+          result (run-tool tool-call arguments (:tools run))]
+      (append-observed-events run clock
+                              [{:type :tool-result
+                                :data {:turn (:turn run)
                                        :call-id (:id tool-call)
                                        :tool tool
-                                       :argument-keys (sort (map name (keys arguments)))}
-                                      {:arguments arguments})
-          result (run-tool tool-call arguments (:tools run))]
-      (append-observed-event! run clock :tool-result
-                              {:turn (:turn run)
-                               :call-id (:id tool-call)
-                               :tool tool
-                               :outcome (result-outcome result)}
-                              {:tool-message (tool-result-message tool-call result)}))
+                                       :outcome (result-outcome result)}
+                                :evidence {:tool-message (tool-result-message tool-call result)}}]))
     (catch Exception error
       (let [result (tool-error :invalid-arguments tool-call error)]
-        (append-observed-event! run clock :tool-result
-                                {:turn (:turn run)
-                                 :call-id (:id tool-call)
-                                 :tool (tool-name tool-call)
-                                 :outcome :error
-                                 :error-kind :invalid-arguments}
-                                {:tool-message (tool-result-message tool-call result)})))))
+        (append-observed-events run clock
+                                [{:type :tool-result
+                                  :data {:turn (:turn run)
+                                         :call-id (:id tool-call)
+                                         :tool (tool-name tool-call)
+                                         :outcome :error
+                                         :error-kind :invalid-arguments}
+                                  :evidence {:tool-message (tool-result-message tool-call result)}}])))))
 
-(defn- provider-response-data
-  "Builds the run event data summarizing one provider response."
+(defn- model-response-data
+  "Builds the run event data summarizing one model response."
   [run response tool-calls]
   {:turn (:turn run)
    :model (:model response)
    :finish-reason (get-in response [:choices 0 :finish_reason])
    :tool-call-count (count tool-calls)})
 
-(defn- execute-command!
-  "Interprets one effect command and appends its observed facts to the run."
-  [run clock complete! command]
-  (case (:command command)
-    :provider/complete
-    (let [run (append-observed-event! run clock :provider-requested
-                                      {:turn (:turn run)
-                                       :message-count (count (:messages run))
-                                       :tool-count (count (:tools run))}
-                                      nil)
-          response (complete! (:request command))
-          message (assistant-message response)
-          tool-calls (requested-tool-calls message)]
-      (append-observed-event! run clock :provider-responded
-                              (provider-response-data run response tool-calls)
-                              {:assistant-message message}))
-    :tool/execute (execute-tool-command! run clock (:tool-call command))
-    :run/limit
-    (let [run (append-observed-event! run clock :limit-reached
-                                      {:turn (:turn run)
-                                       :kind :max-turns
-                                       :value (:max-turns run)}
-                                      nil)]
-      (append-observed-event! run clock :run-finished
-                              {:status :step-limit
-                               :turn (:turn run)}
-                              nil))
-    :run/finish
-    (append-observed-event! run clock :run-finished
-                            {:status (or (:terminal-status run) :completed)
-                             :turn (:turn run)}
-                            {:final-answer (get-in (last (:messages run)) [:content])})))
+(defn- run-started-event
+  "Builds the observed event that starts one run."
+  [run]
+  {:type :run-started
+   :data {:max-turns (:max-turns run)}
+   :evidence nil})
+
+(defn- user-submitted-event
+  "Builds the observed event for the submitted user prompt."
+  [prompt]
+  {:type :user-submitted
+   :data {:characters (count prompt)}
+   :evidence {:prompt prompt}})
+
+(defn- limit-reached-event
+  "Builds the observed event for a run that reached its turn limit."
+  [run]
+  {:type :limit-reached
+   :data {:turn (:turn run)
+          :kind :max-turns
+          :value (:max-turns run)}
+   :evidence nil})
+
+(defn- run-finished-event
+  "Builds the observed terminal event for a run."
+  [run status evidence]
+  {:type :run-finished
+   :data {:status status
+          :turn (:turn run)}
+   :evidence evidence})
+
+(defn command-executor
+  "Builds an imperative executor for model, tool, and run commands."
+  [{:keys [complete! clock]}]
+  (fn [run command]
+    (case (:command command)
+      :run/start
+      (append-observed-events run clock
+                              [(run-started-event run)
+                               (user-submitted-event (:prompt command))])
+      :model/complete
+      (let [run (append-observed-event run clock :model-requested
+                                       {:turn (:turn run)
+                                        :message-count (count (:messages run))
+                                        :tool-count (count (:tools run))}
+                                       nil)
+            response (complete! (:request command))
+            message (assistant-message response)
+            tool-calls (requested-tool-calls message)]
+        (append-observed-event run clock :model-responded
+                               (model-response-data run response tool-calls)
+                               {:assistant-message message}))
+      :tool/execute
+      (execute-tool-command run clock (:tool-call command))
+      :run/limit
+      (append-observed-events run clock
+                              [(limit-reached-event run)
+                               (run-finished-event run :step-limit nil)])
+      :run/finish
+      (append-observed-events run clock
+                              [(run-finished-event
+                                run
+                                (or (:terminal-status run) :completed)
+                                {:final-answer (get-in (last (:messages run)) [:content])})]))))
 
 (defn- terminal-result
   "Builds the public terminal result from a finished immutable run."
@@ -236,23 +278,28 @@
   []
   (str (UUID/randomUUID)))
 
-(defn run!
-  "Runs an event-driven OpenAI Chat Completions agent state machine.
+(defn- default-command-executor
+  "Builds the command executor used by a normal local agent run."
+  []
+  (command-executor {:complete! model-client/complete!
+                     :clock default-clock}))
 
-   `complete!` and `clock` are shell dependencies. The run state, events, and
-   next-command decisions remain immutable data."
-  [{:keys [complete! clock run-id system prompt tools max-turns]
-    :or {complete! provider/complete!
-         clock default-clock
+(defn run!
+  "Runs an event-driven agent state machine through an injected command executor.
+
+   `next-command` is a pure driver. `command-executor!` owns model calls,
+   tools, clocks, and all other imperative command dependencies."
+  [{:keys [command-executor! next-command run-id system prompt tools max-turns]
+    :or {command-executor! (default-command-executor)
+         next-command model-driver
          max-turns 8}}]
   (let [run (new-run {:run-id (or run-id (new-run-id))
                       :system system
                       :tools tools
                       :max-turns max-turns})
-        run (append-observed-event! run clock :run-started {:max-turns max-turns} nil)
-        run (append-observed-event! run clock :user-submitted {:characters (count prompt)}
-                                    {:prompt prompt})]
+        run (command-executor! run {:command :run/start
+                                    :prompt prompt})]
     (loop [run run]
       (if-let [command (next-command run)]
-        (recur (execute-command! run clock complete! command))
+        (recur (command-executor! run command))
         (terminal-result run)))))
