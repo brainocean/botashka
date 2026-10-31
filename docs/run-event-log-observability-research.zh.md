@@ -1,22 +1,22 @@
-# Botashka 的执行 trace 与 OpenTelemetry：保守集成研究
+# Botashka 的 run event log 与 OpenTelemetry：保守集成研究
 
 ## 结论（建议）
 
-**建议：先把现有 execution trace 收敛为唯一的、结构化的运行事实流；现在不在 Babashka 进程内接入完整 OpenTelemetry SDK。** 在事实流稳定后，只增加一个可选的、单向的 `observation` 投影接口：默认实现仍写本地 trace/终端；未来 JVM Clojure 宿主可在该接口后实现 OTLP traces/metrics exporter。这样既不会把观测协议变成 agent 控制流，也不预设 TUI、持久化 store 或 HTTP server。
+**建议：先把现有运行记录收敛为唯一的、结构化的本地 run event log；现在不在 Babashka 进程内接入完整 OpenTelemetry SDK。** event log 保留受配额和访问策略约束的 RCA evidence；每个 observation projection 只消费 allowlisted、redacted summary。事实流稳定后，才增加可选、单向的 `observation` 投影接口：未来 JVM Clojure 宿主可在其后实现 OTLP traces/metrics exporter。这样既不会把观测协议变成 agent 控制流，也不预设 TUI、持久化 store 或 HTTP server。
 
-这是与仓库词汇的一致切分：`Agent run` 已拥有有序 execution trace；`Run observation` 消费事实，不能反向决定 agent 行为（见 [`CONTEXT.md`](../CONTEXT.md)）。OpenTelemetry（OTel）应是可替换的**外部投影**，不是 trace 的权威存储，也不是 event schema 的来源。
+这是与仓库词汇一致的切分：`Agent run` 已拥有有序 run event log；`Run observation` 消费事实，不能反向决定 agent 行为（见 [`CONTEXT.md`](../CONTEXT.md)）。OpenTelemetry（OTel）是可替换的**外部投影**，不是 event log 的权威存储，也不是 event schema 的来源。按 OTel 术语，当前线性 event log 不是 trace：OTel trace 是由有 parent/child 关系、开始/结束时间和 status 的 spans 组成的因果图。
 
 ## 1. 三种信号：各自回答什么问题
 
 | 信号 | OTel 中的含义与适用问题 | Botashka 当前对应物 | 现在的处理 |
 | --- | --- | --- | --- |
-| **日志（logs）** | 带时间戳的离散记录；适合可读诊断、错误细节和运行文本。OTel Logs 数据模型可携带 trace/span context，用于关联，但日志本身不是调用树。 | 终端输出、异常文字、必要的 redacted 摘要。 | 保持人可读；从 trace event 渲染。不要把日志解析回状态。 |
-| **追踪（traces）** | 一个 trace 由因果相关的 spans 组成；span 有开始/结束时间、状态、属性和 events，回答“一次 run/调用经过了哪些边界、耗时和失败在哪里”。 | 一次 `Agent run` 及其 provider/tool 子操作。 | 保留 trace 的有序事实；将来可按 run 建 root span、按外部操作建 child span。 |
+| **日志（logs）** | 带时间戳的离散记录；适合可读诊断、错误细节和运行文本。OTel Logs 数据模型可携带 trace/span context，用于关联，但日志本身不是调用树。 | 终端输出、异常文字、必要的 redacted 摘要。 | 保持人可读；从 run event 渲染。不要把日志解析回状态。 |
+| **追踪（traces）** | 一个 trace 由因果相关的 spans 组成；span 有开始/结束时间、状态、属性和 events，回答“一次 run/调用经过了哪些边界、耗时和失败在哪里”。 | 一次 `Agent run` 及其 provider/tool 子操作。 | 保留 run event log 的有序事实；将来可按 run 建 root span、按外部操作建 child span。 |
 | **指标（metrics）** | 随时间聚合的数值时间序列，回答“发生多少、耗时分布、当前多少”，而非某一 run 的完整过程。 | run 总数、终态计数、provider/tool 耗时直方图、in-flight 数。 | 仅在已有长期运行的 JVM exporter 或 scrape endpoint 时导出；不要以每个 run 的 ID、prompt、路径等作标签。 |
 
 OTel 的规范明确将 traces、metrics、logs（以及 profiles）作为不同信号，并以共同 `Context` 关联；语义约定还分别规定资源、trace、metric、log/event 的命名。[OTel overview](https://opentelemetry.io/docs/specs/otel/overview/)、[Logs specification](https://opentelemetry.io/docs/specs/otel/logs/)、[semantic conventions overview](https://opentelemetry.io/docs/specs/semconv/)。
 
-**建议：事实与投影分离。** 例如一次 `:tool-result` 是不可变的领域事实；可从它渲染一行日志、在一个 span 上记录 event，或递增失败计数器。三者都不能替代原始事实：日志缺少可靠结构，span 会被采样/导出失败，metrics 天生丢失逐次细节。
+**建议：事实、RCA evidence 与投影分离。** 例如一次 `:tool-result` 是不可变 run event。其受控本地 evidence 可以保存 arguments/result 或指向有配额的 payload artifact，供 RCA 读取；日志、span 和 metrics 只接收 allowlisted summary。三者都不能替代原始 evidence：日志缺少可靠结构，span 会被采样/导出失败，metrics 天生丢失逐次细节。
 
 ## 2. 运行时可行性：Babashka 与 JVM Clojure 不能等同
 
@@ -85,7 +85,7 @@ OTel trace API 将 span 表示为操作，span 可有 attributes、events、stat
 | tool child | registry 的受控 tool 名、调用 ID、持续时间、结果分类、timeout/cancel 标记 | 可用稳定自定义 `botashka.tool.name` / `botashka.tool.outcome`；工具不是自动等同于 HTTP/DB/RPC。只有真跨 HTTP/process 边界时才加对应标准语义字段，并执行脱敏。 |
 | 错误 | error kind/class、稳定 code、是否可重试、redacted message/digest | OTel 对 error status/exception recording 有规范；记录错误不等于导出秘密或完整 tool output。[recording exceptions](https://opentelemetry.io/docs/specs/otel/trace/exceptions/)。 |
 
-**建议：只记录 allowlist 属性。** prompt、LLM completion、工具参数、文件内容、access token、Authorization header、环境变量和完整 stdout/stderr 默认不得进入 span attribute、log body 或 metric label。必须诊断时，领域 trace 持有已限长且脱敏的摘要；原始敏感材料继续留在既有受控边界之外。
+**建议：投影只记录 allowlist 属性；本地 evidence 才可在 policy 下保留原始材料。** prompt、LLM completion、工具参数、文件内容、access token、Authorization header、环境变量和完整 stdout/stderr 默认不得进入 span attribute、log body 或 metric label。RCA 所需的 prompt、arguments、result、final answer 应留在 run-local evidence：小 payload 可受总量/单项上限直接存入 event 的 `:evidence`；大 payload 写入受访问控制的 payload artifact，event 只存 `:digest`、`:characters`、`:truncated?` 与 artifact reference。超限必须显式标记，不能静默丢失。
 
 ### 上下文传播
 
@@ -103,12 +103,12 @@ OTel Context 是跨信号/跨边界关联的机制；W3C Trace Context 定义 `t
 只在现有 `append-event!`/execution-trace 的**一个**出口后增加接口，不改变 `botashka.agent` 的状态机和返回值。用数据而非 OTel 对象穿过核心：
 
 ```clojure
-;; 领域事实已先写入 execution trace；观察端失败不得改变 run 的终态。
+;; 领域事实已先写入 run event log；观察端失败不得改变 run 的终态。
 (defprotocol ObservationSink
   (observe! [sink event])
   (close-run! [sink terminal-result]))
 
-;; nil/local 实现：仅现有 trace/terminal renderer。
+;; nil/local 实现：仅现有 run-event-log/terminal renderer。
 ;; future JVM implementation：按 event 投影 root/child spans、logs、metrics，批量导出。
 ```
 
@@ -116,12 +116,12 @@ OTel Context 是跨信号/跨边界关联的机制；W3C Trace Context 定义 `t
 
 **推荐的事件处理顺序：**
 
-1. agent 形成完整、redacted 的领域 event（含 `:run-id`、单调 `:seq`、时间、`:type`）；
-2. trace owner 追加它，保持本地事实的顺序和失败语义；
-3. 同步调用可选 sink，或由未来 publisher 有界异步消费该 event；sink 失败只形成本地诊断，不阻断 agent；
-4. run 结束时以 terminal result 关闭投影；未来 SDK component 在应用停止时 flush/shutdown。
+1. agent 形成完整 run event：`data` 是 projection-safe summary；`evidence` 由 run-local policy 控制；两者均含 `:run-id`、单调 `:seq`、时间和 `:type`；
+2. event-log owner 追加它，保持本地事实的顺序和失败语义；
+3. synchronous optional sink 只接收 allowlisted projection，或由未来 publisher 有界异步消费；sink failure 只形成本地诊断，不阻断 agent；
+4. run 结束时以 terminal result 关闭 projection；未来 SDK component 在应用停止时 flush/shutdown。
 
-这使“OTel exporter 不可用”“collector 网络失败”“采样丢弃 span”都不篡改 `:completed`、`:step-limit` 等领域结论。若未来确有异步 publisher，必须定义有界队列、丢弃/背压计数、drain/stop 顺序；在需要前不要引入线程或 component manager。
+默认采用字段分级 evidence policy：prompt、final answer、structured tool arguments 在配额内保留；`read_file` content 和 tool stdout/stderr 仅保留摘要/digest，除非人类显式开启 capture。capture 是 host 的 run option，不是模型可设置的 tool argument。
 
 ## 6. 现在明确不做
 
@@ -129,17 +129,17 @@ OTel Context 是跨信号/跨边界关联的机制；W3C Trace Context 定义 `t
 
 - 不在 Babashka 中加载 OTel Java SDK、Java agent 或依赖它们的 exporter；
 - 不增加 OTLP collector、sidecar、常驻 JVM、HTTP `/metrics`、Phoenix endpoint 或数据库，只为“未来可观测性”；
-- 不把 OTel span/trace ID 作为领域 run ID，或用 OTel 替换 append-only execution trace；
-- 不建立 dashboard、alert、全链路 sampling policy、tail sampling、日志聚合或 trace store；
+- 不把 OTel span/trace ID 作为领域 run ID，或用 OTel 替换 append-only run event log；
+- 不建立 dashboard、alert、全链路 sampling policy、tail sampling、日志聚合或 OTel trace store；
 - 不自动捕获 prompt、completion、文件内容、tool I/O、环境变量或 secrets；
 - 不为每一内部函数、每个 token 或每个 event 创建 span，不用 run ID 等高基数值作 Prometheus label；
 - 不为了 exporter 而引入 TUI、持久化 session store、并发执行或 HTTP server。
 
 ## 7. 分阶段的可验收切入点（建议）
 
-1. **先收敛（当前）：** 固定领域 event 的 envelope（run ID、序号、时间、type、redacted payload、terminal status），使所有现有执行路径从同一 trace 出口发出事实；继续只输出本地 trace/日志。
+1. **先收敛（当前）：** 固定 run event 的 envelope（run ID、序号、时间、type、redacted projection data、terminal status），使所有现有执行路径从同一 log 出口发出事实；继续只输出本地 run event log/日志。
 2. **只加 seam：** 当确有第二个消费者时，接入上述 no-op/local `ObservationSink`，并证明 sink 失败不会改变 agent 返回值或事件顺序。
 3. **JVM/OTLP 触发后：** 仅在 Botashka 有 JVM Clojure 长寿命宿主或明确 collector 时，配置一次 OTel SDK，导出 root/child spans 和四个低基数指标；以 OTel Java 文档/当时稳定 semconv 校验字段。
-4. **Phoenix/Prometheus 触发后：** Phoenix 服务通过已有进程边界接收/传播 context；Prometheus 仅抓取长寿命服务的聚合 metrics。分别验收 trace 关联和 metrics 序列，而不是要求二者读取原始 CLI trace。
+4. **Phoenix/Prometheus 触发后：** Phoenix 服务通过已有进程边界接收/传播 context；Prometheus 仅抓取长寿命服务的聚合 metrics。分别验收 OTel trace 关联和 metrics 序列，而不是要求二者读取原始 CLI run event log。
 
 这种顺序保留了 OTel 的互操作性，却让当前 Babashka 工具先解决它已经拥有的、最有价值的可观测性：可信、可关联、脱敏且不干扰执行的运行事实。

@@ -1,4 +1,4 @@
-{:paths ["src"]
+{:paths ["src" "test"]
 
  :deps {babashka/fs {:mvn/version "0.5.34"}
         babashka/process {:mvn/version "0.6.25"}

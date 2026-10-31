@@ -2,13 +2,13 @@
 
 ## Core terms
 
-- **Agent run** — one bounded attempt to answer a user prompt. It owns the provider conversation, ordered execution trace, terminal status, and any run-scoped cancellation state.
-- **Conversation** — the provider-compatible sequence of user, assistant, and tool-result messages used by one agent run. It is protocol state, not the human-readable execution trace.
-- **Execution trace** — the canonical ordered sequence of immutable, redacted execution facts for one agent run. It is an audit record, not a filesystem snapshot, provider conversation, log stream, or OpenTelemetry trace.
-
-- **Execution event** — one canonical fact in an execution trace. Its envelope identifies the owning run, monotonic sequence, occurrence time, event type, and redacted payload; its event type determines the payload contract.
-- **Observation projection** — a non-authoritative rendering or export of execution facts, such as terminal output, a durable local record, OpenTelemetry spans/logs/metrics, or a UI update. Projection failure MUST NOT alter an agent run's control flow or terminal result.
-- **Observation sink** — an adapter that consumes execution events to produce one observation projection. It does not own agent state or make execution decisions.
+- **Agent run** — one bounded attempt to answer a user prompt. It owns the provider conversation, ordered run event log, terminal status, and any run-scoped cancellation state.
+- **Conversation** — the provider-compatible sequence of user, assistant, and tool-result messages used by one agent run. It is protocol state, not the run event log.
+- **Run event log** — the canonical ordered sequence of immutable execution facts for one agent run. It is local audit evidence, not a filesystem snapshot, provider conversation, text log stream, or OpenTelemetry trace.
+- **Run event** — one canonical fact in a run event log. Its envelope identifies the owning run, monotonic sequence, occurrence time, event type, and event-specific data.
+- **Evidence payload** — bounded local diagnostic material attached to a run event or stored as a payload artifact: for example a prompt, tool arguments, tool result, final answer, or redacted exception detail. The default policy retains prompts, final answers, and structured tool arguments; it retains file content and tool stdout/stderr only as summaries unless capture is explicitly enabled. It MUST NOT automatically enter an external projection.
+- **Observation projection** — a non-authoritative rendering or export of run events, such as terminal output, OpenTelemetry spans/logs/metrics, or a UI update. A projection uses an allowlisted, redacted summary; its failure MUST NOT alter an agent run's control flow or terminal result.
+- **Observation sink** — an adapter that consumes run events to produce one observation projection. It does not own agent state or make execution decisions.
 - **Tool call** — the provider's proposal to invoke a named host capability with JSON arguments. It is not execution.
 - **Tool result** — the host's structured result or structured failure for one tool call, associated by the provider call ID.
 - **Tool registry** — the available named capabilities for a run. A registry entry supplies provider schema and a host handler. The registry does not decide whether a capability is allowed.
@@ -24,7 +24,7 @@
 - **Workspace access** — workspace-relative file navigation, searching, reading, later patches and verification. It is a tool-execution subdomain, not run orchestration.
 - **Context management** — selection, bounding, compaction, and preservation of conversation facts across turns or resumptions.
 - **Task control** — explicit task state, retry/recovery policy, user cancellation, pause/resume, and later plans/checklists.
-- **Run observation** — trace persistence, event streaming, metrics, external observability exporters, and later TUI projection. It consumes execution facts; it does not control agent decisions.
+- **Run observation** — durable run-event evidence, redacted projection rendering, event streaming, metrics, external observability exporters, and later TUI projection. It consumes execution facts; it does not control agent decisions.
 - **Mutation workflow** — proposed patch, preview, approval, apply, verification, and rollback for changes to a workspace.
 - **Interaction** — REPL exploration now; later TUI and human approval surfaces. It presents run state and submits user intent; it does not implement provider or tool protocols.
 - **Tool discovery** — later selection of a bounded candidate set from large local/MCP tool catalogs.

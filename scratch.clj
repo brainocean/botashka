@@ -8,6 +8,7 @@
 (comment
 
   ;; Reload changed namespaces in dependency order before running explorations.
+  (require 'botashka.log :reload)
   (require 'botashka.tool-runtime :reload)
   (require 'botashka.tools :reload)
   (require 'botashka.agent :reload)
@@ -91,12 +92,12 @@
     :prompt "Read README.md and state its exact title."
     :tools (tools/code-tool-registry ".")})
 
-  ;; Inspect the structured execution trace of the workspace agent run.
+  ;; Inspect the structured run event log of the workspace agent run.
   (-> (agent/run!
        {:system "Use the file tools to answer questions about the workspace."
         :prompt "Read README.md and state its exact title."
         :tools (tools/code-tool-registry ".")})
-      :trace)
+      :log)
 
   ;; Recover from a missing file by listing the workspace and reading the actual README.
   (agent/run!

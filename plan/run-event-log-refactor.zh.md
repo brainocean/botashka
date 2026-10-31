@@ -1,8 +1,8 @@
-# 执行 trace 重构设计
+# Run event log 重构设计
 
 ## 问题
 
-当前 `botashka.agent` 在多个私有函数中构造并拼接 `:trace` vector：用户输入、provider response、tool call/result、final answer、step limit 各自决定 event shape 和 append 时机。它能完成 REPL probe，却没有一个 trace owner，也没有统一的 event envelope、redaction、时间/耗时、发布或未来 exporter 的位置。
+当前 `botashka.agent` 在多个私有函数中构造并拼接 `:log` vector：用户输入、provider response、tool call/result、final answer、step limit 各自决定 event shape 和 append 时机。它能完成 REPL probe，却没有一个 run-event-log owner，也没有统一的 event envelope、evidence policy、时间/耗时、发布或未来 exporter 的位置。
 
 这会阻碍后续工作：
 
@@ -14,59 +14,75 @@
 
 ## 决策
 
-将 trace 重构为一个深 module：`botashka.trace`。
+将当前 run event log 收敛为一个深 module：`botashka.log`。
 
-它拥有**execution event 的生成、排序、保存和发布**；`agent`、`provider`、`tool-runtime` 只在明确的领域或 effect seam 处发出事实。所有观测输出均是 execution trace 的非权威 projection。
+它拥有**run event 的生成、排序、保存和发布**；`agent`、`provider`、`tool-runtime` 只在明确的领域或 effect seam 处发出事实。所有观测输出均是 run event log 的非权威 projection。
 
 ```mermaid
 flowchart LR
-  A[agent run] -->|emit domain fact| T[botashka.trace]
+  A[agent run] -->|emit domain fact| T[botashka.log]
   P[provider call] -->|with-effect| T
   R[tool subprocess] -->|with-effect| T
-  T --> M[in-memory execution trace]
-  T -. future projection .-> D[durable local record]
+  T --> M[in-memory run event log]
+  T -. future evidence .-> D[durable local evidence]
   T -. future projection .-> O[OTel OTLP]
   T -. future projection .-> U[terminal / TUI]
   O -. consumes .-> X[collector / Phoenix-adjacent backend]
   O -. metrics .-> Y[Prometheus long-lived host]
 ```
 
-`botashka.trace` 不负责 provider conversation、tool authorization、terminal rendering 或 run-state transition。它只记录 host 已观察到的事实并通知 optional observers。
+`botashka.log` 不负责 provider conversation、tool authorization、terminal rendering 或 run-state transition。它只记录 host 已观察到的事实并通知 optional observers。
 
 ## 术语与边界
 
-- **Execution trace** 是一场 Agent run 的 canonical ordered immutable facts；它不是 provider conversation、文件系统快照、文本日志，也不是 OpenTelemetry trace。
-- **Execution event** 是 trace 中一条完整、已脱敏的事实。
-- **Observation projection** 是 event 的非权威输出，如 terminal text、本地持久化、OTel spans/logs/metrics、UI update。
-- **Observation sink** 消费 event 产生一个 projection；sink 失败不得改变 run 的 control flow 或 terminal result。
+- **Run event log** 是一场 Agent run 的 canonical ordered immutable facts；它不是 provider conversation、文件系统快照、文本日志，也不是 OpenTelemetry trace。
+- **Run event** 是 log 中一条完整事实；它有可投影的 `:data`，可选受控本地 `:evidence`。
+- **Evidence payload** 是供 RCA 的 bounded local diagnostic material；小 payload 可在 event 内，大 payload 用 artifact reference。
+- **Observation projection** 是 event 的非权威输出，如 terminal text、OTel spans/logs/metrics、UI update；只读取 allowlisted、redacted summary。
 
 这些术语已写入 `CONTEXT.md`。
 
 ## 事件 contract
 
-所有 execution event 先经 `botashka.trace/emit!` 归一化，再进入 run trace。调用者不得手写 `:run-id`、`:seq` 或 `:at`。
+所有 run event 先经 `botashka.log/emit!` 归一化，再进入 event log。调用者不得手写 `:run-id`、`:seq` 或 `:at`。
 
 ```clojure
 {:run-id "01J..."                         ; recorder 所有
  :seq 7                                    ; 每个 run 内严格单调，从 0 开始
  :at "2026-10-31T10:12:13.456Z"           ; recorder 时钟生成
  :type :tool-result                        ; 封闭的领域事件类型
- :data {:turn 1
+ :data {:turn 1                            ; 可投影、已脱敏的摘要
         :call-id "call_..."
         :tool "read_file"
         :outcome :ok
         :result {:content-digest "sha256:..."
-                 :characters 11}}}
+                 :characters 11}}
+ :evidence {:result {:content "# botashka\n"}}} ; 本地 RCA 专用，受 policy 限制
 ```
 
 ### 规则
 
-1. `:data` 是 event-type-specific map；不要把数据平铺到 envelope。
-2. event 在产生时已脱敏、限长。不得将 prompt、completion、file content、tool arguments、完整 stdout/stderr、credentials、headers、environment variables 直接放入 event。
-3. 能用于诊断的信息采用 allowlist summary，例如 tool name、outcome、字符数、稳定 error kind、redacted message、digest、duration。
-4. trace event 是 host fact，不记录“模型认为已修改文件”之类未由 host 验证的结论。
-5. recorder 是每 run 显式持有的值；不使用 namespace atom、REPL history 或动态全局变量作为 application state。
-6. event sequence 是真相顺序；wall-clock 只用于人类/外部关联，不能替代 `:seq`。
+1. `:data` 是 event-type-specific map，供 projection 使用；不要把数据平铺到 envelope。
+2. `:evidence` 是可选的 local-only data。它不会自动流向 terminal、OTel、Prometheus、Phoenix 或 UI projection。
+3. evidence payload 有单项和单 run 配额。小 payload 可内嵌；大 payload 写 payload artifact，event 保存 digest、size、`:truncated?` 和 reference。超限必须显式标记，不能静默丢失。
+4. secrets、credentials、authorization headers、environment variables 绝不进入 evidence 或 projection。prompt、completion、file content、tool arguments、stdout/stderr 是否保存由明确 policy 决定，默认不外发。
+5. 能用于投影诊断的信息采用 allowlist summary，例如 tool name、outcome、字符数、稳定 error kind、redacted message、digest、duration。
+6. run event 是 host fact，不记录“模型认为已修改文件”之类未由 host 验证的结论。
+7. recorder 是每 run 显式持有的值；不使用 namespace atom、REPL history 或动态全局变量作为 application state。
+8. event sequence 是真相顺序；wall-clock 只用于人类/外部关联，不能替代 `:seq`。
+
+### 默认 evidence policy
+
+| 材料 | 默认本地 evidence | 外部 projection |
+| --- | --- | --- |
+| 用户 prompt | 保留，受单项/单 run 配额 | digest、characters；不输出原文 |
+| final answer | 保留，受配额 | status、characters；不输出原文 |
+| 结构化 tool arguments | 保留，排除敏感字段 | key names、digest |
+| `read_file` content 与 tool stdout/stderr | 仅摘要、digest、characters；显式 capture 才保存原文/artifact | 摘要、outcome、duration |
+| provider completion 原文 | 仅摘要；显式 capture 才保存 | model、finish reason、usage 摘要 |
+| credentials、auth headers、environment variables | 永不保存 | 永不输出 |
+
+显式 capture 是 run option，不是 model-controlled tool argument。
 
 ### 第一批事件类型
 
@@ -91,7 +107,7 @@ flowchart LR
 第一切片只需要一个 recorder 和一个可选单向 callback；不引入 protocol、global bus、队列或 component manager。
 
 ```clojure
-(ns botashka.trace)
+(ns botashka.log)
 
 (defn recorder
   "Creates a run-scoped recorder.
@@ -121,10 +137,10 @@ flowchart LR
 宏适合消除**重复且横切的 effect 生命周期样板**，不适合隐式猜测业务事实。
 
 ```clojure
-(trace/with-effect trace :provider/request {:turn turn :model model}
+(log/with-effect log :provider/request {:turn turn :model model}
   (provider/complete! request))
 
-(trace/with-effect trace :tool/process {:tool tool-name :program program}
+(log/with-effect log :tool/process {:tool tool-name :program program}
   (tool-runtime/run! program input))
 ```
 
@@ -147,35 +163,35 @@ flowchart LR
 
 ## Agent 改造
 
-将 `agent/run!` 增加显式 `:trace` option；未提供时在 run 开头创建 recorder。返回值仍有 `:trace`，但它来自 `(trace/events recorder)`，而不是每个 private helper 拼接 vector。
+将 `agent/run!` 增加显式 `:log` option；未提供时在 run 开头创建 recorder。返回值使用 `:log`，且它来自 `(log/events recorder)`，而不是每个 private helper 拼接 vector。
 
 ```clojure
 (defn run!
-  [{:keys [trace] :as options}]
-  (let [trace (or trace (trace/recorder {:run-id (new-run-id)}))]
-    (trace/emit! trace :run-started ...)
+  [{:keys [log] :as options}]
+  (let [log (or log (log/recorder {:run-id (new-run-id)}))]
+    (log/emit! log :run-started ...)
     ...
-    (trace/emit! trace :run-finished ...)
-    {:status ... :trace (trace/events trace)}))
+    (log/emit! log :run-finished ...)
+    {:status ... :log (log/events log)}))
 ```
 
 精确迁移：
 
 | 当前散落逻辑 | 新位置 |
 | --- | --- |
-| loop 初始 `:user-prompt` map | `trace/emit!`，在 conversation 建立后 |
-| `provider-response-event` | 正规化 response 后 `trace/emit! :provider-responded` |
-| `tool-call-event` | arguments 成功 parse 后 `trace/emit! :tool-proposed` |
-| `tool-result-event` | execution 返回或 argument parse 失败后 `trace/emit! :tool-result` |
-| `:step-limit` | `trace/emit! :limit-reached`，再发 `:run-finished` |
-| `:final-answer` | 改为 `:run-finished` 的 terminal summary；final text 不进入 trace |
+| loop 初始 `:user-prompt` map | `log/emit!`；`:data` 记录长度/digest，`:evidence` 可按 policy 保存 prompt |
+| `provider-response-event` | 正规化 response 后 `log/emit! :provider-responded`；completion 原文作为可选 evidence |
+| `tool-call-event` | arguments 成功 parse 后 `log/emit! :tool-proposed`；arguments 作为可选 evidence |
+| `tool-result-event` | execution 返回或 argument parse 失败后 `log/emit! :tool-result`；result/error detail 作为可选 evidence |
+| `:step-limit` | `log/emit! :limit-reached`，再发 `:run-finished` |
+| `:final-answer` | `:run-finished` 的 `:data` 只写 terminal summary；final text 是可选 evidence |
 | `tool-runtime/run!` | 由 agent/registry 调用点用 `with-effect` 包围；runtime 不获得 recorder 参数 |
 
 `tool-runtime` 保持“运行 artifact 并返回 structured result”的接口。这样工具可在 agent 之外执行，不会被 telemetry 反向污染；tool execution 的归属由调用方明确。
 
 ## 观测投影与 OTel 路径
 
-当前只需 memory trace。第二个消费者出现后才启用 `:observe!` callback：例如 terminal renderer 或 durable append writer。一个 observer 接口足够，因为目前只有一个明确变化轴——consumer；不提前增加 sink registry、dispatcher 或 async publisher。
+当前只需 memory run event log。第二个消费者出现后才启用 `:observe!` callback：例如 terminal renderer 或 durable append writer。一个 observer 接口足够，因为目前只有一个明确变化轴——consumer；不提前增加 sink registry、dispatcher 或 async publisher。
 
 未来 JVM Clojure host 中，独立 `Event publisher` component 可将事实投影为：
 
@@ -185,16 +201,16 @@ flowchart LR
 - 低基数 metrics：run status counter、run/tool duration histogram、有限 registry tool names 的 outcome counter；
 - 可选 redacted logs。
 
-OTel exporter / collector / Prometheus `/metrics` / Phoenix integration 不属于 recorder。它们的失败、采样、网络延迟不能改变 trace 事实或 agent terminal state。
+OTel exporter / collector / Prometheus `/metrics` / Phoenix integration 不属于 recorder。它们的失败、采样、网络延迟不能改变 run event log 事实或 agent terminal state。
 
-Babashka 不能假设可加载依赖 OpenTelemetry Java SDK 的 library；详细运行时约束与 Phoenix/Prometheus 消费模型见 [`docs/trace-observability-research.zh.md`](../docs/trace-observability-research.zh.md)。当前不实现 OTLP、HTTP metrics endpoint、sidecar 或常驻 JVM。
+Babashka 不能假设可加载依赖 OpenTelemetry Java SDK 的 library；详细运行时约束与 Phoenix/Prometheus 消费模型见 [`docs/run-event-log-observability-research.zh.md`](../docs/run-event-log-observability-research.zh.md)。当前不实现 OTLP、HTTP metrics endpoint、sidecar 或常驻 JVM。
 
 ## 实施切片与验证
 
-### Slice A — 收敛 execution trace
+### Slice A — 收敛 run event log
 
-1. 新建 `src/botashka/trace.clj`，实现 `recorder`、`emit!`、`events`。
-2. 在 `agent/run!` 创建/接收 recorder；删除全部本地 trace vector accumulation 和 event-builder helpers。
+1. 新建 `src/botashka/log.clj`，实现 `recorder`、`emit!`、`events`。
+2. 在 `agent/run!` 创建/接收 recorder；删除全部本地 log vector accumulation 和 event-builder helpers。
 3. 迁移既有五类事实到统一 envelope，并在所有 terminal path 发 `:run-finished`。
 4. 接受可注入 `:clock` 和 `:run-id`，使 event order/time 可确定性测试。
 5. 通过真实 workspace agent smoke：读取 `README.md`，确认 `:seq` 连续、每个 event 有 envelope、最后 event 是 `:run-finished`。
@@ -224,5 +240,5 @@ Babashka 不能假设可加载依赖 OpenTelemetry Java SDK 的 library；详细
 - 每个 terminal run 恰有一个最后的 `:run-finished`；其 `:data :status` 等于 result `:status`。
 - observer 缺失或抛错时，run result 和 canonical trace 顺序不变。
 - effect macro 成功时保留 body 返回值；失败时记录失败事实并 rethrow 原 throwable。
-- trace 与任何 projection 都不得默认包含 secret、prompt/completion 原文、file content、tool I/O 原文或无界 payload。
+- projection 不得默认包含 secret、prompt/completion 原文、file content、tool I/O 原文或无界 payload；本地 evidence 只按字段分级 policy、配额与显式 capture 保存材料。
 - 真实 agent smoke 仍可经 discovered `read_file` 回答 `README.md` 标题。
