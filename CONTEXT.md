@@ -4,7 +4,11 @@
 
 - **Agent run** — one bounded attempt to answer a user prompt. It owns the provider conversation, ordered execution trace, terminal status, and any run-scoped cancellation state.
 - **Conversation** — the provider-compatible sequence of user, assistant, and tool-result messages used by one agent run. It is protocol state, not the human-readable execution trace.
-- **Execution trace** — an ordered sequence of immutable facts emitted during an agent run. Current event types include `:user-prompt`, `:provider-response`, `:tool-call`, `:tool-result`, `:final-answer`, and `:step-limit`.
+- **Execution trace** — the canonical ordered sequence of immutable, redacted execution facts for one agent run. It is an audit record, not a filesystem snapshot, provider conversation, log stream, or OpenTelemetry trace.
+
+- **Execution event** — one canonical fact in an execution trace. Its envelope identifies the owning run, monotonic sequence, occurrence time, event type, and redacted payload; its event type determines the payload contract.
+- **Observation projection** — a non-authoritative rendering or export of execution facts, such as terminal output, a durable local record, OpenTelemetry spans/logs/metrics, or a UI update. Projection failure MUST NOT alter an agent run's control flow or terminal result.
+- **Observation sink** — an adapter that consumes execution events to produce one observation projection. It does not own agent state or make execution decisions.
 - **Tool call** — the provider's proposal to invoke a named host capability with JSON arguments. It is not execution.
 - **Tool result** — the host's structured result or structured failure for one tool call, associated by the provider call ID.
 - **Tool registry** — the available named capabilities for a run. A registry entry supplies provider schema and a host handler. The registry does not decide whether a capability is allowed.
