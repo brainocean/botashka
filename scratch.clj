@@ -8,7 +8,6 @@
 (comment
 
   ;; Reload changed namespaces in dependency order before running explorations.
-  (require 'botashka.log :reload)
   (require 'botashka.tool-runtime :reload)
   (require 'botashka.tools :reload)
   (require 'botashka.agent :reload)

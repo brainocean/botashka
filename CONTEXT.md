@@ -3,9 +3,10 @@
 ## Core terms
 
 - **Agent run** — one bounded attempt to answer a user prompt. It owns the provider conversation, ordered run event log, terminal status, and any run-scoped cancellation state.
-- **Conversation** — the provider-compatible sequence of user, assistant, and tool-result messages used by one agent run. It is protocol state, not the run event log.
-- **Run event log** — the canonical ordered sequence of immutable execution facts for one agent run. It is local audit evidence, not a filesystem snapshot, provider conversation, text log stream, or OpenTelemetry trace.
-- **Run event** — one canonical fact in a run event log. Its envelope identifies the owning run, monotonic sequence, occurrence time, event type, and event-specific data.
+- **Conversation** — the provider-compatible sequence of user, assistant, and tool-result messages derived from canonical run events. It is protocol state, not the run event log.
+- **Run event log** — the canonical ordered sequence of immutable execution facts for one agent run. It is local audit evidence and the input to pure run-state/read-model derivation; it is not a filesystem snapshot, text log stream, or OpenTelemetry trace.
+- **Run event** — one canonical fact in a run event log. Its envelope identifies the owning run, monotonic sequence, occurrence time, event type, event-specific data, and optional local evidence.
+- **Command** — a pure description of the one external action currently permitted by derived run state. A command is intent, not a fact; the shell records an observed result event only after it executes the action.
 - **Evidence payload** — bounded local diagnostic material attached to a run event or stored as a payload artifact: for example a prompt, tool arguments, tool result, final answer, or redacted exception detail. The default policy retains prompts, final answers, and structured tool arguments; it retains file content and tool stdout/stderr only as summaries unless capture is explicitly enabled. It MUST NOT automatically enter an external projection.
 - **Observation projection** — a non-authoritative rendering or export of run events, such as terminal output, OpenTelemetry spans/logs/metrics, or a UI update. A projection uses an allowlisted, redacted summary; its failure MUST NOT alter an agent run's control flow or terminal result.
 - **Observation sink** — an adapter that consumes run events to produce one observation projection. It does not own agent state or make execution decisions.
