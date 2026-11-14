@@ -11,26 +11,32 @@
                 :required ["path"]
                 :additionalProperties false}})
 
-(defn- workspace-path
+(defn- resolve-workspace-path
   [workspace path]
-  (let [workspace (fs/canonicalize workspace)
-        target (fs/canonicalize (fs/path workspace path))]
-    (when-not (fs/starts-with? target workspace)
-      (throw (ex-info "Path is outside the workspace"
-                      {:workspace (str workspace)
-                       :path path})))
-    target))
+  (try
+    (let [workspace (fs/canonicalize workspace)
+          target (fs/canonicalize (fs/path workspace (or path "")))]
+      (if (fs/starts-with? target workspace)
+        {:path target}
+        {:error {:kind :path-outside-workspace
+                 :path path}}))
+    (catch Exception error
+      {:error {:kind :invalid-path
+               :path path
+               :message (.getMessage error)}})))
 
 (defn run
   [{:keys [workspace path]}]
-  (let [directory (workspace-path workspace path)]
-    (if (fs/directory? directory)
-      {:files (->> (fs/list-dir directory)
-                   (map #(str (fs/file-name %)))
-                   sort
-                   vec)}
-      {:error {:kind :not-a-directory
-               :path path}})))
+  (let [{directory :path error :error} (resolve-workspace-path workspace path)]
+    (if error
+      {:error error}
+      (if (fs/directory? directory)
+        {:files (->> (fs/list-dir directory)
+                     (map #(str (fs/file-name %)))
+                     sort
+                     vec)}
+        {:error {:kind :not-a-directory
+                 :path path}}))))
 
 (let [input (-> *in* slurp edn/read-string)]
   (if (= :describe (:command input))
