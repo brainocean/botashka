@@ -58,59 +58,106 @@
           run
           events))
 
+(defn- normalize-tool-command
+  "Normalizes direct tool commands and model-proposed tool calls into a unified shape."
+  [command]
+  (let [explicit-call (:tool-call command)
+        origin (or (:origin command) (:origin explicit-call)
+                   (if explicit-call :model :host))
+        tool-call (or explicit-call
+                      (let [tool-name (or (:tool command) (get-in command [:function :name]))
+                            args (:arguments command)
+                            args-str (if (string? args)
+                                       args
+                                       (json/generate-string (or args {})))]
+                        {:id (str "call-" (java.util.UUID/randomUUID))
+                         :function {:name tool-name
+                                    :arguments args-str}}))]
+    (assoc tool-call :origin origin)))
+
 (defn- execute-tool-command
   "Executes one tool command and appends its observed proposal and result events."
-  [run clock tool-call]
-  (let [raw-arguments (get-in tool-call [:function :arguments])
+  [run clock command]
+  (let [tool-call (normalize-tool-command command)
+        origin (:origin tool-call)
+        raw-arguments (get-in tool-call [:function :arguments])
         parsed (try
                  {:arguments (json/parse-string raw-arguments true)}
                  (catch Exception error
                    {:error error}))
         run (if-let [args (:arguments parsed)]
               (append-observed-event run clock
-                                     (run/tool-proposed-event run tool-call args))
+                                     (run/tool-proposed-event run tool-call args origin))
               (append-observed-event run clock
-                                     (run/tool-proposed-event run tool-call raw-arguments)))
+                                     (run/tool-proposed-event run tool-call raw-arguments origin)))
         result (if-let [args (:arguments parsed)]
                  (run-tool tool-call args (:tools run))
                  (tool-error :invalid-arguments tool-call (:error parsed)))
-        tool-msg (tool-result-message tool-call result)]
+        tool-msg (when (= origin :model)
+                   (tool-result-message tool-call result))]
     (append-observed-event run clock
-                           (run/tool-result-event run tool-call result tool-msg))))
+                           (run/tool-result-event run tool-call result tool-msg origin))))
 
 (defn command-executor
   "Builds an imperative executor for model, tool, and run commands."
-  [{:keys [complete! clock]}]
+  [{:keys [complete! clock authorize]
+    :or {authorize (constantly :allow)}}]
   (fn [run command]
-    (case (:command command)
-      :run/start
-      (append-observed-events run clock
-                              [(run/run-started-event run)
-                               (run/user-submitted-event (:prompt command))])
-      :model/complete
-      (let [run (append-observed-event run clock (run/model-requested-event run))
-            response (complete! (:request command))]
-        (if-let [err (:error response)]
-          (append-observed-event run clock (run/model-failed-event run err))
-          (let [message (assistant-message response)
-                tool-calls (:tool_calls message)]
-            (append-observed-event run clock
-                                   (run/model-responded-event run response message tool-calls)))))
-      :tool/execute
-      (execute-tool-command run clock (:tool-call command))
-      :run/limit
-      (append-observed-events run clock
-                              [(run/limit-reached-event run)
-                               (run/run-finished-event run :step-limit nil)])
-      :run/finish
-      (append-observed-events run clock
-                              [(run/run-finished-event
-                                run
-                                (or (:terminal-status run) :completed)
-                                {:final-answer (get-in (last (:messages run)) [:content])})]))))
+    (let [auth (authorize run command)]
+      (if (and (not= auth :allow)
+               (not= (:decision auth) :allow)
+               (not (true? auth)))
+        (let [reason (or (when (map? auth) (:reason auth))
+                         "Command rejected by authorization policy")]
+          (if (= (:command command) :tool/execute)
+            (let [tool-call (normalize-tool-command command)
+                  origin (:origin tool-call)
+                  arguments (try
+                              (json/parse-string (get-in tool-call [:function :arguments]) true)
+                              (catch Exception _ nil))
+                  run (append-observed-event run clock
+                                             (run/tool-proposed-event run tool-call (or arguments "") origin))
+                  err-result {:error {:kind :action-rejected :reason reason}}
+                  tool-msg (when (= origin :model)
+                             (tool-result-message tool-call err-result))]
+              (append-observed-event run clock
+                                     (run/tool-result-event run tool-call err-result tool-msg origin)))
+            (append-observed-events run clock
+                                    [(run/run-finished-event run :rejected {:reason reason})])))
+        (case (:command command)
+          :run/start
+          (append-observed-events run clock
+                                  [(run/run-started-event run)
+                                   (run/user-submitted-event (:prompt command))])
+          :model/complete
+          (let [run (append-observed-event run clock (run/model-requested-event run))
+                response (complete! (:request command))]
+            (if-let [err (:error response)]
+              (append-observed-event run clock (run/model-failed-event run err))
+              (let [message (assistant-message response)
+                    tool-calls (:tool_calls message)]
+                (append-observed-event run clock
+                                       (run/model-responded-event run response message tool-calls)))))
+          :tool/execute
+          (execute-tool-command run clock command)
+          :run/limit
+          (append-observed-events run clock
+                                  [(run/limit-reached-event run)
+                                   (run/run-finished-event run :step-limit nil)])
+          :run/finish
+          (let [result (or (:result command) (get-in (last (:messages run)) [:content]))
+                terminal-status (or (:terminal-status run) :completed)]
+            (append-observed-events run clock
+                                    [(run/run-finished-event
+                                      run
+                                      terminal-status
+                                      {:final-answer result})])))))))
 
 (defn default-command-executor
   "Builds the command executor used by a normal local agent run."
-  []
-  (command-executor {:complete! model-client/complete!
-                     :clock #(str (Instant/now))}))
+  ([]
+   (default-command-executor {}))
+  ([options]
+   (command-executor (merge {:complete! model-client/complete!
+                             :clock #(str (Instant/now))}
+                            options))))

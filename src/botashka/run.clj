@@ -52,15 +52,19 @@
                          :terminal-status :provider-error)
     :tool-proposed run
     :tool-result
-    (let [pending-tool-calls (remove-tool-call (:pending-tool-calls run)
-                                               (:call-id data))
-          next-turn (if (empty? pending-tool-calls)
+    (let [origin (get data :origin :model)
+          model-origin? (= origin :model)
+          pending-tool-calls (if model-origin?
+                               (remove-tool-call (:pending-tool-calls run)
+                                                 (:call-id data))
+                               (:pending-tool-calls run))
+          next-turn (if (or (not model-origin?) (empty? pending-tool-calls))
                       (inc (:turn run))
                       (:turn run))]
       (cond-> (-> run
-                  (update :messages conj (:tool-message evidence))
                   (assoc :pending-tool-calls pending-tool-calls
                          :turn next-turn))
+        (:tool-message evidence) (update :messages conj (:tool-message evidence))
         (seq pending-tool-calls) (assoc :status :awaiting-tools)
         (empty? pending-tool-calls) (assoc :status :awaiting-model)))
     :limit-reached (assoc run :status :ready-to-finish
@@ -82,24 +86,50 @@
         (update :events conj event)
         (apply-event event))))
 
-(defn model-driver
-  "Purely chooses the next command for a run driven by model completions."
+(defn default-action-policy
+  "Default action policy: drives model completions and processes pending assistant tool calls."
   [run]
   (case (:status run)
-    :awaiting-model (if (= (:turn run) (:max-turns run))
+    :awaiting-model (if (>= (:turn run) (:max-turns run))
                       {:command :run/limit}
                       {:command :model/complete
                        :request (model-request run)})
-    :awaiting-tools {:command :tool/execute
-                     :tool-call (first (:pending-tool-calls run))}
+    :awaiting-tools (when-let [tc (first (:pending-tool-calls run))]
+                      {:command :tool/execute
+                       :tool-call tc
+                       :origin :model})
     :ready-to-finish {:command :run/finish}
     nil))
+
+(defn first-applicable-action-policy
+  "Combines multiple action policies by evaluating them in order.
+   Returns the command from the first policy that returns non-nil."
+  [& policies]
+  (fn [run]
+    (some #(% run) policies)))
+
+(defn action-proposal
+  "Builds an action proposal candidate with origin and confidence metadata."
+  [{:keys [command proposed-by confidence evidence]}]
+  {:command command
+   :proposed-by (or proposed-by :host)
+   :confidence (or confidence 1.0)
+   :evidence evidence})
+
+(defn arbitrate-proposals
+  "Arbitrates among candidate action proposals.
+   Picks the proposal with highest confidence, breaking ties by earliest proposal."
+  [proposals]
+  (when (seq proposals)
+    (:command (apply max-key :confidence proposals))))
 
 (defn terminal-result
   "Builds the public terminal result from a finished immutable run."
   [run]
   {:status (:terminal-status run)
-   :text (get-in (last (:events run)) [:evidence :final-answer])
+   :text (or (get-in (last (:events run)) [:evidence :final-answer])
+             (get-in (last (:events run)) [:evidence :result])
+             (get-in (last (:events run)) [:data :result]))
    :messages (:messages run)
    :log (:events run)})
 
@@ -164,27 +194,37 @@
 
 (defn tool-proposed-event
   "Builds the observed event for a proposed tool call."
-  [run tool-call arguments-or-raw]
-  (let [tool (get-in tool-call [:function :name])
-        parsed? (map? arguments-or-raw)]
-    {:type :tool-proposed
-     :data (cond-> {:turn (:turn run)
-                    :call-id (:id tool-call)
-                    :tool tool}
-             parsed? (assoc :argument-keys (sort (map name (keys arguments-or-raw)))))
-     :evidence (if parsed?
-                 {:arguments arguments-or-raw}
-                 {:raw-arguments arguments-or-raw})}))
+  ([run tool-call arguments-or-raw]
+   (tool-proposed-event run tool-call arguments-or-raw (or (:origin tool-call) :model)))
+  ([run tool-call arguments-or-raw origin]
+   (let [tool (or (get-in tool-call [:function :name]) (:tool tool-call))
+         call-id (or (:id tool-call) (:call-id tool-call))
+         parsed? (map? arguments-or-raw)]
+     {:type :tool-proposed
+      :data (cond-> {:turn (:turn run)
+                     :call-id call-id
+                     :tool tool
+                     :origin origin}
+              parsed? (assoc :argument-keys (sort (map name (keys arguments-or-raw)))))
+      :evidence (if parsed?
+                  {:arguments arguments-or-raw}
+                  {:raw-arguments arguments-or-raw})})))
 
 (defn tool-result-event
   "Builds the observed event for a tool execution result."
-  [run tool-call result tool-message]
-  (let [outcome (if (:error result) :error :ok)
-        error-kind (get-in result [:error :kind])]
-    {:type :tool-result
-     :data (cond-> {:turn (:turn run)
-                    :call-id (:id tool-call)
-                    :tool (get-in tool-call [:function :name])
-                    :outcome outcome}
-             error-kind (assoc :error-kind error-kind))
-     :evidence {:tool-message tool-message}}))
+  ([run tool-call result tool-message]
+   (tool-result-event run tool-call result tool-message (or (:origin tool-call) :model)))
+  ([run tool-call result tool-message origin]
+   (let [outcome (if (:error result) :error :ok)
+         error-kind (get-in result [:error :kind])
+         call-id (or (:id tool-call) (:call-id tool-call))
+         tool (or (get-in tool-call [:function :name]) (:tool tool-call))]
+     {:type :tool-result
+      :data (cond-> {:turn (:turn run)
+                     :call-id call-id
+                     :tool tool
+                     :origin origin
+                     :outcome outcome}
+              error-kind (assoc :error-kind error-kind))
+      :evidence (cond-> {:result result}
+                  tool-message (assoc :tool-message tool-message))})))

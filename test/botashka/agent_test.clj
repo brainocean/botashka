@@ -88,7 +88,7 @@
             :request {:system "Reply concisely."
                       :messages [{:role "user" :content "ping"}]
                       :tools []}}
-           (run/model-driver state)))))
+           (run/default-action-policy state)))))
 
 (deftest model-response-event-derives-terminal-run-state
   (let [state (-> (run/new-run {:run-id "run-terminal"
@@ -114,13 +114,13 @@
                                                          :content "pong"}}))]
     (is (= :ready-to-finish (:status state)))
     (is (= {:command :run/finish}
-           (run/model-driver state)))
+           (run/default-action-policy state)))
     (is (= [{:role "user" :content "ping"}
             {:role "assistant" :content "pong"}]
            (:messages state)))))
-(deftest agent-run-uses-injected-driver
-  (let [driver-calls (atom [])
-        result (agent/run! {:next-command #(do (swap! driver-calls conj (:status %))
+(deftest agent-run-uses-injected-action-policy
+  (let [policy-calls (atom [])
+        result (agent/run! {:action-policy #(do (swap! policy-calls conj (:status %))
                                                (case (:status %)
                                                  :awaiting-model {:command :run/finish}
                                                  nil))
@@ -128,11 +128,11 @@
                                                 (fn [_]
                                                   (throw (ex-info "Model client must not run" {})))
                                                 (constantly "2026-10-31T10:00:00Z"))
-                            :run-id "run-driver"
+                            :run-id "run-policy"
                             :system "ignored"
                             :prompt "ping"
                             :tools {}})]
-    (is (= [:awaiting-model :finished] @driver-calls))
+    (is (= [:awaiting-model] @policy-calls))
     (is (= :completed (:status result)))
     (is (= [:run-started :user-submitted :run-finished]
            (mapv :type (:log result))))))
@@ -237,3 +237,87 @@
     (is (= :provider-error (:status result)))
     (is (= [:run-started :user-submitted :model-requested :model-failed :run-finished]
            (mapv :type (:log result))))))
+
+(deftest agent-run-executes-direct-tool-commands-with-scripted-policy
+  (let [executed (atom [])
+        scripted-policy (fn [run]
+                          (case (:turn run)
+                            0 {:command :tool/execute
+                               :tool "probe"
+                               :arguments {:query "target"}}
+                            1 {:command :run/finish
+                               :result "Task completed successfully"}
+                            nil))
+        result (agent/run! {:action-policy scripted-policy
+                            :command-executor! (command-executor/command-executor
+                                                {:complete! (fn [_] (throw (ex-info "No LLM calls allowed" {})))
+                                                 :clock (constantly "2026-10-31T10:00:00Z")})
+                            :run-id "run-scripted"
+                            :prompt "Execute deterministic workflow"
+                            :tools {"probe" {:schema {:type "function"}
+                                             :run (fn [args]
+                                                    (swap! executed conj args)
+                                                    {:found true})}}})]
+    (is (= :completed (:status result)))
+    (is (= "Task completed successfully" (:text result)))
+    (is (= [{:query "target"}] @executed))
+    (is (= [:run-started :user-submitted :tool-proposed :tool-result :run-finished]
+           (mapv :type (:log result))))
+    (is (= :host (get-in (:log result) [2 :data :origin])))
+    (is (= :host (get-in (:log result) [3 :data :origin])))
+    (is (= :ok (get-in (:log result) [3 :data :outcome])))))
+
+(deftest agent-run-enforces-authorization-policy-rejection
+  (let [tool-executed? (atom false)
+        policy (fn [run]
+                 (case (:status run)
+                   :awaiting-model (if (some #(= :action-rejected (get-in % [:data :error-kind]))
+                                             (:events run))
+                                     {:command :run/finish :result "Safely halted"}
+                                     {:command :tool/execute
+                                      :tool "delete_all"
+                                      :arguments {:force true}})
+                   :ready-to-finish {:command :run/finish}
+                   nil))
+        auth-policy (fn [_run command]
+                      (if (= (or (:tool command) (get-in command [:tool-call :function :name])) "delete_all")
+                        {:decision :deny :reason "Destructive operation forbidden"}
+                        :allow))
+        result (agent/run! {:action-policy policy
+                            :authorization-policy auth-policy
+                            :command-executor! (command-executor/command-executor
+                                                {:complete! (fn [_] (throw (ex-info "No LLM allowed" {})))
+                                                 :clock (constantly "2026-10-31T10:00:00Z")
+                                                 :authorize auth-policy})
+                            :run-id "run-auth-deny"
+                            :prompt "Attempt forbidden operation"
+                            :tools {"delete_all" {:schema {:type "function"}
+                                                  :run (fn [_]
+                                                         (reset! tool-executed? true)
+                                                         {:deleted true})}}})]
+    (is (= false @tool-executed?))
+    (is (= :completed (:status result)))
+    (is (= "Safely halted" (:text result)))
+    (let [tool-res-evt (nth (:log result) 3)]
+      (is (= :tool-result (:type tool-res-evt)))
+      (is (= :error (get-in tool-res-evt [:data :outcome])))
+      (is (= :action-rejected (get-in tool-res-evt [:data :error-kind]))))))
+
+(deftest action-policy-composition-and-arbitration
+  (let [p-guard (fn [run]
+                  (when (>= (:turn run) 5)
+                    {:command :run/limit}))
+        p-fallback (constantly {:command :run/finish :result "Fallback"})
+        composite (run/first-applicable-action-policy p-guard p-fallback)
+        state-early (run/new-run {:run-id "r1" :max-turns 8})
+        state-late (assoc state-early :turn 6)
+        proposal-a (run/action-proposal {:command {:command :tool/execute :tool "slow"}
+                                         :proposed-by :generative
+                                         :confidence 0.6})
+        proposal-b (run/action-proposal {:command {:command :tool/execute :tool "fast"}
+                                         :proposed-by :judgement
+                                         :confidence 0.95})]
+    (is (= {:command :run/finish :result "Fallback"} (composite state-early)))
+    (is (= {:command :run/limit} (composite state-late)))
+    (is (= {:command :tool/execute :tool "fast"}
+           (run/arbitrate-proposals [proposal-a proposal-b])))))

@@ -12,19 +12,25 @@
 (defn run!
   "Runs an event-driven agent state machine through an injected command executor.
 
-   `next-command` is a pure driver. `command-executor!` owns model calls,
-   tools, clocks, and all other imperative command dependencies."
-  [{:keys [command-executor! next-command run-id system prompt tools max-turns]
-    :or {command-executor! (command-executor/default-command-executor)
-         next-command run/model-driver
-         max-turns 8}}]
-  (let [run (run/new-run {:run-id (or run-id (new-run-id))
+   `action-policy` is a pure function from run state to next command or nil.
+   `command-executor!` owns model calls, tools, clocks, and all other imperative dependencies.
+   `authorization-policy` optionally authorizes, rejects, or asks approval for selected commands."
+  [{:keys [command-executor! action-policy authorization-policy run-id system prompt tools max-turns]
+    :or {max-turns 8}}]
+  (let [action-policy (or action-policy run/default-action-policy)
+        executor (or command-executor!
+                     (command-executor/default-command-executor
+                      (when authorization-policy
+                        {:authorize authorization-policy})))
+        run (run/new-run {:run-id (or run-id (new-run-id))
                           :system system
                           :tools tools
                           :max-turns max-turns})
-        run (command-executor! run {:command :run/start
-                                    :prompt prompt})]
+        run (executor run {:command :run/start
+                           :prompt prompt})]
     (loop [run run]
-      (if-let [command (next-command run)]
-        (recur (command-executor! run command))
-        (run/terminal-result run)))))
+      (if (= :finished (:status run))
+        (run/terminal-result run)
+        (if-let [command (action-policy run)]
+          (recur (executor run command))
+          (run/terminal-result run))))))
