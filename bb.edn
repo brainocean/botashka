@@ -1,1 +1,28 @@
-{:paths ["src"]}
+{:paths ["src" "test"]
+ :tasks
+ {:requires ([botashka.agent :as agent]
+             [botashka.tools :as tools]
+             [clojure.test :refer [run-tests]])
+
+  test
+  {:doc "Runs the deterministic automated test suite"
+   :task (do
+           (require 'botashka.agent-test)
+           (let [r (run-tests 'botashka.agent-test)]
+             (when (or (pos? (:fail r)) (pos? (:error r)))
+               (System/exit 1))))}
+
+  run
+  {:doc "Runs the agent with an optional prompt argument (default: read README title)"
+   :override-builtin true
+   :task (let [prompt (or (first *command-line-args*)
+                          "What is the title of the project? Read README.md using available tools.")
+               registry (tools/code-tool-registry ".")
+               result (agent/run! {:prompt prompt :tools registry})]
+           (println "\n=== Terminal Status ===")
+           (println (:status result))
+           (println "\n=== Text Answer ===")
+           (println (or (:text result) "<no text>"))
+           (println (str "\nTotal Steps: " (count (:log result))))
+           (when-not (= :completed (:status result))
+             (System/exit 1)))}}}
