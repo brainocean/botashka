@@ -44,16 +44,12 @@
    :tool_call_id (:id tool-call)
    :content (json/generate-string result)})
 
-(defn- result-outcome
-  "Classifies a structured tool result for the run event log."
-  [result]
-  (if (:error result) :error :ok))
-
 (defn- append-observed-event
   "Appends one observed event using the executor-owned clock."
-  [run clock type data evidence]
-  (run/append-event run (clock) type data evidence))
-
+  ([run clock event]
+   (run/append-event run (clock) (:type event) (:data event) (:evidence event)))
+  ([run clock type data evidence]
+   (run/append-event run (clock) type data evidence)))
 (defn- append-observed-events
   "Appends observed event descriptions in order with executor-owned timestamps."
   [run clock events]
@@ -65,41 +61,22 @@
 (defn- execute-tool-command
   "Executes one tool command and appends its observed proposal and result events."
   [run clock tool-call]
-  (try
-    (let [arguments (parse-tool-arguments tool-call)
-          tool (tool-name tool-call)
-          run (append-observed-event run clock :tool-proposed
-                                     {:turn (:turn run)
-                                      :call-id (:id tool-call)
-                                      :tool tool
-                                      :argument-keys (sort (map name (keys arguments)))}
-                                     {:arguments arguments})
-          result (run-tool tool-call arguments (:tools run))]
-      (append-observed-events run clock
-                              [{:type :tool-result
-                                :data {:turn (:turn run)
-                                       :call-id (:id tool-call)
-                                       :tool tool
-                                       :outcome (result-outcome result)}
-                                :evidence {:tool-message (tool-result-message tool-call result)}}]))
-    (catch Exception error
-      (let [result (tool-error :invalid-arguments tool-call error)]
-        (append-observed-events run clock
-                                [{:type :tool-result
-                                  :data {:turn (:turn run)
-                                         :call-id (:id tool-call)
-                                         :tool (tool-name tool-call)
-                                         :outcome :error
-                                         :error-kind :invalid-arguments}
-                                  :evidence {:tool-message (tool-result-message tool-call result)}}])))))
-
-(defn- model-response-data
-  "Builds the run event data summarizing one model response."
-  [run response tool-calls]
-  {:turn (:turn run)
-   :model (:model response)
-   :finish-reason (get-in response [:choices 0 :finish_reason])
-   :tool-call-count (count tool-calls)})
+  (let [raw-arguments (get-in tool-call [:function :arguments])
+        parsed (try
+                 {:arguments (json/parse-string raw-arguments true)}
+                 (catch Exception error
+                   {:error error}))
+        run (if-let [args (:arguments parsed)]
+              (append-observed-event run clock
+                                     (run/tool-proposed-event run tool-call args))
+              (append-observed-event run clock
+                                     (run/tool-proposed-event run tool-call raw-arguments)))
+        result (if-let [args (:arguments parsed)]
+                 (run-tool tool-call args (:tools run))
+                 (tool-error :invalid-arguments tool-call (:error parsed)))
+        tool-msg (tool-result-message tool-call result)]
+    (append-observed-event run clock
+                           (run/tool-result-event run tool-call result tool-msg))))
 
 (defn command-executor
   "Builds an imperative executor for model, tool, and run commands."
@@ -111,23 +88,14 @@
                               [(run/run-started-event run)
                                (run/user-submitted-event (:prompt command))])
       :model/complete
-      (let [run (append-observed-event run clock :model-requested
-                                       {:turn (:turn run)
-                                        :message-count (count (:messages run))
-                                        :tool-count (count (:tools run))}
-                                       nil)
+      (let [run (append-observed-event run clock (run/model-requested-event run))
             response (complete! (:request command))]
         (if-let [err (:error response)]
-          (append-observed-event run clock :model-failed
-                                 {:turn (:turn run)
-                                  :error-kind (:kind err)
-                                  :status (:status err)}
-                                 {:error err})
+          (append-observed-event run clock (run/model-failed-event run err))
           (let [message (assistant-message response)
                 tool-calls (:tool_calls message)]
-            (append-observed-event run clock :model-responded
-                                   (model-response-data run response tool-calls)
-                                   {:assistant-message message}))))
+            (append-observed-event run clock
+                                   (run/model-responded-event run response message tool-calls)))))
       :tool/execute
       (execute-tool-command run clock (:tool-call command))
       :run/limit
