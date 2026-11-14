@@ -1,6 +1,8 @@
 (ns botashka.scratch
   (:require [botashka.agent :as agent]
+            [botashka.command-executor :as command-executor]
             [botashka.model-client :as model-client]
+            [botashka.run :as run]
             [botashka.tool-runtime :as tool-runtime]
             [botashka.tools :as tools]
             [cheshire.core :as json]))
@@ -9,6 +11,8 @@
 
   ;; Reload changed namespaces in dependency order before running explorations.
   (require 'botashka.model-client :reload)
+  (require 'botashka.run :reload)
+  (require 'botashka.command-executor :reload)
   (require 'botashka.tool-runtime :reload)
   (require 'botashka.tools :reload)
   (require 'botashka.agent :reload)
