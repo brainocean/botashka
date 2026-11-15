@@ -1,6 +1,9 @@
 (ns botashka.tools
   (:require [babashka.fs :as fs]
-            [botashka.tool-runtime :as tool-runtime]))
+            [botashka.tool-runtime :as tool-runtime]
+            [malli.core :as m]
+            [malli.error :as me]
+            [malli.json-schema :as json-schema]))
 
 (defn- code-tool-programs
   [tools-dir]
@@ -16,8 +19,9 @@
   (and (string? name)
        (not (clojure.string/blank? name))
        (string? description)
-       (map? parameters)
-       (= "object" (:type parameters))))
+       (try
+         (boolean (m/schema parameters))
+         (catch Exception _ false))))
 
 (defn- code-tool-entry
   [workspace program]
@@ -27,13 +31,23 @@
                :program program
                :details metadata}}
       (if (valid-tool-metadata? metadata)
-        (let [{:keys [name description parameters]} metadata]
-          {:entry [name {:schema {:type "function"
+        (let [{:keys [name description parameters]} metadata
+              provider-schema (json-schema/transform parameters)]
+          {:entry [name {:name name
+                         :description description
+                         :parameters parameters
+                         :schema {:type "function"
                                   :function {:name name
                                              :description description
-                                             :parameters parameters}}
-                         :run #(tool-runtime/run! program
-                                                  (assoc % :workspace workspace))}]})
+                                             :parameters provider-schema}}
+                         :run (fn [arguments]
+                                (if-not (m/validate parameters arguments)
+                                  {:error {:kind :invalid-arguments
+                                           :tool name
+                                           :details (me/humanize (m/explain parameters arguments))
+                                           :explain (m/explain parameters arguments)}}
+                                  (tool-runtime/run! program
+                                                     (assoc arguments :workspace workspace))))}]})
         {:error {:kind :invalid-tool-metadata
                  :program program
                  :metadata metadata}}))))

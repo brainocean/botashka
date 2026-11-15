@@ -8,10 +8,9 @@
 (def metadata
   {:name "read_file"
    :description "Reads text from a workspace-relative file path."
-   :parameters {:type "object"
-                :properties {:path {:type "string"}}
-                :required ["path"]
-                :additionalProperties false}})
+   :parameters [:map
+                [:path {:description "Workspace-relative file path to read"}
+                 :string]]})
 
 (defn- resolve-workspace-path
   [workspace path]

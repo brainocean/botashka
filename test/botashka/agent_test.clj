@@ -2,6 +2,7 @@
   (:require [botashka.agent :as agent]
             [botashka.command-executor :as command-executor]
             [botashka.run :as run]
+            [botashka.tools :as tools]
             [clojure.test :refer [deftest is testing]]))
 
 (defn- test-command-executor
@@ -321,3 +322,30 @@
     (is (= {:command :run/limit} (composite state-late)))
     (is (= {:command :tool/execute :tool "fast"}
            (run/arbitrate-proposals [proposal-a proposal-b])))))
+
+(deftest code-tool-registry-discovers-malli-parameters-and-lowers-to-json-schema
+  (let [reg (tools/code-tool-registry ".")
+        read-file (get reg "read_file")
+        list-files (get reg "list_files")]
+    (is (some? read-file))
+    (is (some? list-files))
+    ;; Parameters are defined as Malli schemas (pure EDN vector)
+    (is (vector? (:parameters read-file)))
+    (is (= :map (first (:parameters read-file))))
+    ;; Lowered to standard JSON schema for provider
+    (let [json-sch (get-in read-file [:schema :function :parameters])]
+      (is (= "object" (get json-sch :type)))
+      (is (contains? (get json-sch :properties) :path))
+      (is (= "string" (get-in json-sch [:properties :path :type]))))))
+
+(deftest host-validates-tool-arguments-with-malli-before-execution
+  (let [reg (tools/code-tool-registry ".")
+        read-file (get reg "read_file")
+        ;; Invalid type
+        err-type ((:run read-file) {:path 123})
+        ;; Missing required key
+        err-missing ((:run read-file) {})]
+    (is (= :invalid-arguments (get-in err-type [:error :kind])))
+    (is (some? (get-in err-type [:error :details])))
+    (is (= :invalid-arguments (get-in err-missing [:error :kind])))
+    (is (some? (get-in err-missing [:error :details])))))

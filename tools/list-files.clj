@@ -6,10 +6,9 @@
 (def metadata
   {:name "list_files"
    :description "Lists files and directories at a workspace-relative directory path."
-   :parameters {:type "object"
-                :properties {:path {:type "string"}}
-                :required ["path"]
-                :additionalProperties false}})
+   :parameters [:map
+                [:path {:description "Workspace-relative directory path to list"}
+                 :string]]})
 
 (defn- resolve-workspace-path
   [workspace path]
