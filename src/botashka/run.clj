@@ -30,47 +30,72 @@
   [tool-calls tool-call-id]
   (vec (remove #(= tool-call-id (:id %)) tool-calls)))
 
+(def ^:private event-transitions
+  {:run-started
+   (fn [run _data _evidence]
+     (assoc run :status :awaiting-user))
+
+   :user-submitted
+   (fn [run _data {:keys [prompt]}]
+     (-> run
+         (update :messages conj {:role "user" :content prompt})
+         (assoc :status :awaiting-model)))
+
+   :model-requested
+   (fn [run _data _evidence]
+     (assoc run :status :awaiting-model-response))
+
+   :model-responded
+   (fn [run _data {:keys [assistant-message]}]
+     (let [tool-calls (requested-tool-calls assistant-message)]
+       (cond-> (-> run
+                   (update :messages conj assistant-message)
+                   (assoc :pending-tool-calls (vec tool-calls)))
+         (seq tool-calls) (assoc :status :awaiting-tools)
+         (empty? tool-calls) (assoc :status :ready-to-finish))))
+
+   :model-failed
+   (fn [run _data _evidence]
+     (assoc run :status :ready-to-finish
+                :terminal-status :provider-error))
+
+   :tool-proposed
+   (fn [run _data _evidence]
+     run)
+
+   :tool-result
+   (fn [run data evidence]
+     (let [origin (get data :origin :model)
+           model-origin? (= origin :model)
+           pending-tool-calls (if model-origin?
+                                (remove-tool-call (:pending-tool-calls run)
+                                                  (:call-id data))
+                                (:pending-tool-calls run))
+           next-turn (if (or (not model-origin?) (empty? pending-tool-calls))
+                       (inc (:turn run))
+                       (:turn run))]
+       (cond-> (-> run
+                   (assoc :pending-tool-calls pending-tool-calls
+                          :turn next-turn))
+         (:tool-message evidence) (update :messages conj (:tool-message evidence))
+         (seq pending-tool-calls) (assoc :status :awaiting-tools)
+         (empty? pending-tool-calls) (assoc :status :awaiting-model))))
+
+   :limit-reached
+   (fn [run _data _evidence]
+     (assoc run :status :ready-to-finish
+                :terminal-status :step-limit))
+
+   :run-finished
+   (fn [run data _evidence]
+     (assoc run :status :finished
+                :terminal-status (:status data)))})
+
 (defn apply-event
-  "Purely derives the next run state from one canonical run event."
+  "Purely derives the next run state from one canonical run event using data-driven transitions."
   [run {:keys [type data evidence]}]
-  (case type
-    :run-started (assoc run :status :awaiting-user)
-    :user-submitted (-> run
-                        (update :messages conj {:role "user"
-                                                :content (:prompt evidence)})
-                        (assoc :status :awaiting-model))
-    :model-requested (assoc run :status :awaiting-model-response)
-    :model-responded
-    (let [message (:assistant-message evidence)
-          tool-calls (requested-tool-calls message)]
-      (cond-> (-> run
-                  (update :messages conj message)
-                  (assoc :pending-tool-calls (vec tool-calls)))
-        (seq tool-calls) (assoc :status :awaiting-tools)
-        (empty? tool-calls) (assoc :status :ready-to-finish)))
-    :model-failed (assoc run :status :ready-to-finish
-                         :terminal-status :provider-error)
-    :tool-proposed run
-    :tool-result
-    (let [origin (get data :origin :model)
-          model-origin? (= origin :model)
-          pending-tool-calls (if model-origin?
-                               (remove-tool-call (:pending-tool-calls run)
-                                                 (:call-id data))
-                               (:pending-tool-calls run))
-          next-turn (if (or (not model-origin?) (empty? pending-tool-calls))
-                      (inc (:turn run))
-                      (:turn run))]
-      (cond-> (-> run
-                  (assoc :pending-tool-calls pending-tool-calls
-                         :turn next-turn))
-        (:tool-message evidence) (update :messages conj (:tool-message evidence))
-        (seq pending-tool-calls) (assoc :status :awaiting-tools)
-        (empty? pending-tool-calls) (assoc :status :awaiting-model)))
-    :limit-reached (assoc run :status :ready-to-finish
-                          :terminal-status :step-limit)
-    :run-finished (assoc run :status :finished
-                         :terminal-status (:status data))
+  (if-let [transition (get event-transitions type)]
+    (transition run data evidence)
     run))
 
 (defn append-event
@@ -86,20 +111,30 @@
         (update :events conj event)
         (apply-event event))))
 
+(def ^:private status-action-rules
+  {:awaiting-model
+   (fn [run]
+     (if (>= (:turn run) (:max-turns run))
+       {:command :run/limit}
+       {:command :model/complete
+        :request (model-request run)}))
+
+   :awaiting-tools
+   (fn [run]
+     (when-let [tc (first (:pending-tool-calls run))]
+       {:command :tool/execute
+        :tool-call tc
+        :origin :model}))
+
+   :ready-to-finish
+   (constantly {:command :run/finish})})
+
 (defn default-action-policy
-  "Default action policy: drives model completions and processes pending assistant tool calls."
+  "Default action policy: drives model completions and processes pending assistant tool calls
+   using data-driven status action rules."
   [run]
-  (case (:status run)
-    :awaiting-model (if (>= (:turn run) (:max-turns run))
-                      {:command :run/limit}
-                      {:command :model/complete
-                       :request (model-request run)})
-    :awaiting-tools (when-let [tc (first (:pending-tool-calls run))]
-                      {:command :tool/execute
-                       :tool-call tc
-                       :origin :model})
-    :ready-to-finish {:command :run/finish}
-    nil))
+  (when-let [rule (get status-action-rules (:status run))]
+    (rule run)))
 
 (defn first-applicable-action-policy
   "Combines multiple action policies by evaluating them in order.
