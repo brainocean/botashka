@@ -8,7 +8,10 @@
    :description "Lists files and directories at a workspace-relative directory path."
    :parameters [:map
                 [:path {:description "Workspace-relative directory path to list"}
-                 :string]]})
+                 :string]]
+   :returns [:or
+             [:map [:files [:vector :string]]]
+             [:map [:error [:map [:kind :keyword]]]]]})
 
 (defn- resolve-workspace-path
   [workspace path]

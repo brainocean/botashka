@@ -15,13 +15,17 @@
     []))
 
 (defn- valid-tool-metadata?
-  [{:keys [name description parameters]}]
+  [{:keys [name description parameters returns]}]
   (and (string? name)
        (not (clojure.string/blank? name))
        (string? description)
        (try
          (boolean (m/schema parameters))
-         (catch Exception _ false))))
+         (catch Exception _ false))
+       (or (nil? returns)
+           (try
+             (boolean (m/schema returns))
+             (catch Exception _ false)))))
 
 (defn- code-tool-entry
   [workspace program]
@@ -31,11 +35,12 @@
                :program program
                :details metadata}}
       (if (valid-tool-metadata? metadata)
-        (let [{:keys [name description parameters]} metadata
+        (let [{:keys [name description parameters returns]} metadata
               provider-schema (json-schema/transform parameters)]
           {:entry [name {:name name
                          :description description
                          :parameters parameters
+                         :returns returns
                          :schema {:type "function"
                                   :function {:name name
                                              :description description
@@ -46,8 +51,15 @@
                                            :tool name
                                            :details (me/humanize (m/explain parameters arguments))
                                            :explain (m/explain parameters arguments)}}
-                                  (tool-runtime/run! program
-                                                     (assoc arguments :workspace workspace))))}]})
+                                  (let [result (tool-runtime/run! program
+                                                                  (assoc arguments :workspace workspace))]
+                                    (if (and returns (not (m/validate returns result)))
+                                      {:error {:kind :invalid-tool-output-contract
+                                               :tool name
+                                               :details (me/humanize (m/explain returns result))
+                                               :explain (m/explain returns result)
+                                               :raw-output result}}
+                                      result))))}]})
         {:error {:kind :invalid-tool-metadata
                  :program program
                  :metadata metadata}}))))

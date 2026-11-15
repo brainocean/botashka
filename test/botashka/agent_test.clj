@@ -387,3 +387,62 @@
            @recorded-req))
     (is (= :custom-policy (get-in (:events state) [0 :data :origin])))
     (is (= :custom-policy (get-in (:events state) [1 :data :origin])))))
+
+(deftest host-validates-tool-return-contract-post-execution
+  (let [reg (tools/code-tool-registry ".")
+        read-file (get reg "read_file")
+        list-files (get reg "list_files")]
+    (is (some? (:returns read-file)))
+    (is (some? (:returns list-files)))
+    ;; Normal execution conforms to :returns
+    (let [res ((:run read-file) {:path "README.md"})]
+      (is (string? (:content res))))))
+
+(deftest agent-loop-handles-post-check-contract-violation-and-continues
+  (let [buggy-tool {:parameters [:map [:x :int]]
+                    :returns [:map [:sum :int]]
+                    :run (fn [{:keys [x]}]
+                           ;; Deliberately breaks return contract by missing :sum
+                           {:wrong-key x})}
+        guarded-tool {:run (fn [args]
+                             (let [res ((:run buggy-tool) args)
+                                   ret-schema (:returns buggy-tool)]
+                               (if (and ret-schema (not (malli.core/validate ret-schema res)))
+                                 {:error {:kind :invalid-tool-output-contract
+                                          :tool "buggy"
+                                          :details (malli.error/humanize (malli.core/explain ret-schema res))
+                                          :raw-output res}}
+                                 res)))}
+        responses (atom [{:choices [{:finish_reason "stop"
+                                     :message {:role "assistant"
+                                               :tool_calls [{:id "call-buggy"
+                                                             :type "function"
+                                                             :function {:name "buggy"
+                                                                        :arguments "{\"x\": 10}"}}]}}]}
+                         {:choices [{:finish_reason "stop"
+                                     :message {:role "assistant"
+                                               :content "Detected contract failure and recovered"}}]}])
+        received-tool-msgs (atom [])
+        complete! (fn [req]
+                    (let [r (first @responses)]
+                      (swap! responses subvec 1)
+                      (when-let [tool-msg (first (filter #(= (:role %) "tool") (:messages req)))]
+                        (swap! received-tool-msgs conj tool-msg))
+                      r))
+        result (agent/run! {:command-executor! (command-executor/command-executor
+                                                {:complete! complete!
+                                                 :clock (constantly "2026-10-31T10:00:00Z")})
+                            :run-id "run-post-check"
+                            :prompt "Run buggy tool"
+                            :tools {"buggy" guarded-tool}})]
+    (is (= :completed (:status result)))
+    (is (= "Detected contract failure and recovered" (:text result)))
+    ;; Tool result message was generated and delivered to model without halting the loop
+    (is (= 1 (count @received-tool-msgs)))
+    (let [content (:content (first @received-tool-msgs))]
+      (is (clojure.string/includes? content "invalid-tool-output-contract"))
+      (is (clojure.string/includes? content "missing required key")))
+    ;; Tool result was recorded in event log with outcome error
+    (let [tool-res (first (filter #(= (:type %) :tool-result) (:log result)))]
+      (is (= :error (get-in tool-res [:data :outcome])))
+      (is (= :invalid-tool-output-contract (get-in tool-res [:data :error-kind]))))))

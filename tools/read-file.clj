@@ -10,7 +10,10 @@
    :description "Reads text from a workspace-relative file path."
    :parameters [:map
                 [:path {:description "Workspace-relative file path to read"}
-                 :string]]})
+                 :string]]
+   :returns [:or
+             [:map [:content :string]]
+             [:map [:error [:map [:kind :keyword]]]]]})
 
 (defn- resolve-workspace-path
   [workspace path]
