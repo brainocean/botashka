@@ -3,6 +3,7 @@
  :tasks
  {:requires ([botashka.agent :as agent]
              [botashka.tools :as tools]
+             [botashka.trace :as trace]
              [clojure.test :refer [run-tests]])
 
   test
@@ -14,12 +15,17 @@
                (System/exit 1))))}
 
   run
-  {:doc "Runs the agent with an optional prompt argument (default: read README title)"
+  {:doc "Runs the agent with an optional prompt and --graph/-g switch for execution trace visualization"
    :override-builtin true
-   :task (let [prompt (or (first *command-line-args*)
+   :task (let [flags #{"--graph" "-g" "--trace" "-t"}
+               graph? (boolean (some flags *command-line-args*))
+               raw-args (remove flags *command-line-args*)
+               prompt (or (first raw-args)
                           "What is the title of the project? Read README.md using available tools.")
                registry (tools/code-tool-registry ".")
                result (agent/run! {:prompt prompt :tools registry})]
+           (when graph?
+             (trace/render-trace-graph result))
            (println "\n=== Terminal Status ===")
            (println (:status result))
            (println "\n=== Text Answer ===")

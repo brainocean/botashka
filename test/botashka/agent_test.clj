@@ -3,6 +3,7 @@
             [botashka.command-executor :as command-executor]
             [botashka.run :as run]
             [botashka.tools :as tools]
+            [botashka.trace :as trace]
             [clojure.test :refer [deftest is testing]]))
 
 (defn- test-command-executor
@@ -349,3 +350,20 @@
     (is (some? (get-in err-type [:error :details])))
     (is (= :invalid-arguments (get-in err-missing [:error :kind])))
     (is (some? (get-in err-missing [:error :details])))))
+
+(deftest trace-graph-renders-all-event-types
+  (let [sample-result {:status :completed
+                       :text "done"
+                       :messages []
+                       :log [{:seq 0 :type :run-started :data {:max-turns 8}}
+                             {:seq 1 :type :user-submitted :evidence {:prompt "hello"}}
+                             {:seq 2 :type :model-requested :data {:tool-count 1 :message-count 1}}
+                             {:seq 3 :type :model-responded :data {:model "test" :finish-reason "stop"}
+                              :evidence {:assistant-message {:content "hi"}}}
+                             {:seq 4 :type :run-finished :data {:status :completed}}]}
+        output (with-out-str (trace/render-trace-graph sample-result))]
+    (is (clojure.string/includes? output "Execution Trace Graph"))
+    (is (clojure.string/includes? output ":run-started"))
+    (is (clojure.string/includes? output ":user-submitted"))
+    (is (clojure.string/includes? output ":model-requested"))
+    (is (clojure.string/includes? output ":run-finished"))))
