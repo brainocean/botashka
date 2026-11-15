@@ -87,11 +87,11 @@
                                     {:characters 4}
                                     {:prompt "ping"}))]
     (is (= {:command :model/complete
-            :request {:system "Reply concisely."
-                      :messages [{:role "user" :content "ping"}]
-                      :tools []}}
+            :origin :policy
+            :system "Reply concisely."
+            :messages [{:role "user" :content "ping"}]
+            :tools []}
            (run/default-action-policy state)))))
-
 (deftest model-response-event-derives-terminal-run-state
   (let [state (-> (run/new-run {:run-id "run-terminal"
                                 :system "Reply concisely."
@@ -367,3 +367,23 @@
     (is (clojure.string/includes? output ":user-submitted"))
     (is (clojure.string/includes? output ":model-requested"))
     (is (clojure.string/includes? output ":run-finished"))))
+
+(deftest model-command-projection-and-execution-with-origin
+  (let [run (-> (run/new-run {:run-id "r-ctx" :system "Sys" :max-turns 4})
+                (update :messages conj {:role "user" :content "Hello"}))
+        ctx (run/build-model-context run)
+        recorded-req (atom nil)
+        executor (command-executor/command-executor
+                  {:complete! (fn [req]
+                                (reset! recorded-req req)
+                                {:choices [{:finish_reason "stop"
+                                            :message {:role "assistant" :content "Hi"}}]})
+                   :clock (constantly "2026-10-31T10:00:00Z")})
+        state (executor run (merge {:command :model/complete :origin :custom-policy}
+                                   ctx))]
+    (is (= {:system "Sys" :messages [{:role "user" :content "Hello"}] :tools []}
+           ctx))
+    (is (= {:system "Sys" :messages [{:role "user" :content "Hello"}] :tools []}
+           @recorded-req))
+    (is (= :custom-policy (get-in (:events state) [0 :data :origin])))
+    (is (= :custom-policy (get-in (:events state) [1 :data :origin])))))

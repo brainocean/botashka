@@ -1,7 +1,7 @@
 (ns botashka.run)
 
-(defn- model-request
-  "Builds the model request from the current derived conversation and tools."
+(defn build-model-context
+  "Purely projects the model invocation parameters (context projection) from current run state."
   [run]
   {:system (:system run)
    :messages (:messages run)
@@ -116,8 +116,9 @@
    (fn [run]
      (if (>= (:turn run) (:max-turns run))
        {:command :run/limit}
-       {:command :model/complete
-        :request (model-request run)}))
+       (merge {:command :model/complete
+               :origin :policy}
+              (build-model-context run))))
 
    :awaiting-tools
    (fn [run]
@@ -201,34 +202,47 @@
 
 (defn model-requested-event
   "Builds the observed event for an outgoing model completion request."
-  [run]
-  {:type :model-requested
-   :data {:turn (:turn run)
-          :message-count (count (:messages run))
-          :tool-count (count (:tools run))}
-   :evidence nil})
+  ([run]
+   (model-requested-event run nil :policy))
+  ([run model-request]
+   (model-requested-event run model-request :policy))
+  ([run model-request origin]
+   (let [msgs (or (:messages model-request) (:messages run))
+         tools (or (:tools model-request) (mapv :schema (vals (:tools run))))]
+     {:type :model-requested
+      :data (cond-> {:turn (:turn run)
+                     :origin (or origin :policy)
+                     :message-count (count msgs)
+                     :tool-count (count tools)}
+              (:model model-request) (assoc :model (:model model-request)))
+      :evidence nil})))
 
 (defn model-responded-event
   "Builds the observed event for a successful model completion response."
-  [run response assistant-message tool-calls]
-  {:type :model-responded
-   :data {:turn (:turn run)
-          :model (:model response)
-          :finish-reason (get-in response [:choices 0 :finish_reason])
-          :tool-call-count (count tool-calls)}
-   :evidence {:assistant-message assistant-message}})
+  ([run response assistant-message tool-calls]
+   (model-responded-event run response assistant-message tool-calls :policy))
+  ([run response assistant-message tool-calls origin]
+   {:type :model-responded
+    :data {:turn (:turn run)
+           :origin (or origin :policy)
+           :model (:model response)
+           :finish-reason (get-in response [:choices 0 :finish_reason])
+           :tool-call-count (count tool-calls)}
+    :evidence {:assistant-message assistant-message}}))
 
 (defn model-failed-event
   "Builds the observed event for a failed model completion request."
-  [run error]
-  {:type :model-failed
-   :data {:turn (:turn run)
-          :error-kind (:kind error)
-          :status (:status error)}
-   :evidence {:error error}})
+  ([run error]
+   (model-failed-event run error :policy))
+  ([run error origin]
+   {:type :model-failed
+    :data {:turn (:turn run)
+           :origin (or origin :policy)
+           :error-kind (:kind error)
+           :status (:status error)}
+    :evidence {:error error}}))
 
 (defn tool-proposed-event
-  "Builds the observed event for a proposed tool call."
   ([run tool-call arguments-or-raw]
    (tool-proposed-event run tool-call arguments-or-raw (or (:origin tool-call) :model)))
   ([run tool-call arguments-or-raw origin]

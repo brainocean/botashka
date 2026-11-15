@@ -130,14 +130,16 @@
                                   [(run/run-started-event run)
                                    (run/user-submitted-event (:prompt command))])
           :model/complete
-          (let [run (append-observed-event run clock (run/model-requested-event run))
-                response (complete! (:request command))]
+          (let [model-req (or (:request command) (dissoc command :command :origin))
+                origin (or (:origin command) :policy)
+                run (append-observed-event run clock (run/model-requested-event run model-req origin))
+                response (complete! model-req)]
             (if-let [err (:error response)]
-              (append-observed-event run clock (run/model-failed-event run err))
+              (append-observed-event run clock (run/model-failed-event run err origin))
               (let [message (assistant-message response)
                     tool-calls (:tool_calls message)]
                 (append-observed-event run clock
-                                       (run/model-responded-event run response message tool-calls)))))
+                                       (run/model-responded-event run response message tool-calls origin)))))
           :tool/execute
           (execute-tool-command run clock command)
           :run/limit
