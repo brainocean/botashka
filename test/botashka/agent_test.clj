@@ -328,10 +328,12 @@
   (let [reg (tools/code-tool-registry ".")
         read-file (get reg "read_file")
         list-files (get reg "list_files")
-        search-text (get reg "search_text")]
+        search-text (get reg "search_text")
+        run-command (get reg "run_command")]
     (is (some? read-file))
     (is (some? list-files))
     (is (some? search-text))
+    (is (some? run-command))
     ;; Parameters are defined as Malli schemas (pure EDN vector)
     (is (vector? (:parameters read-file)))
     (is (= :map (first (:parameters read-file))))
@@ -394,14 +396,14 @@
   (let [reg (tools/code-tool-registry ".")
         read-file (get reg "read_file")
         list-files (get reg "list_files")
-        search-text (get reg "search_text")]
+        search-text (get reg "search_text")
+        run-command (get reg "run_command")]
     (is (some? (:returns read-file)))
     (is (some? (:returns list-files)))
     (is (some? (:returns search-text)))
-    ;; Normal execution conforms to :returns
+    (is (some? (:returns run-command)))
     (let [res ((:run read-file) {:path "README.md"})]
       (is (string? (:content res))))))
-
 (deftest agent-loop-handles-post-check-contract-violation-and-continues
   (let [buggy-tool {:parameters [:map [:x :int]]
                     :returns [:map [:sum :int]]
@@ -460,3 +462,12 @@
     (is (vector? (:matches res)))
     (is (some #(= "src/botashka/tools.clj" (:path %)) (:matches res)))
     (is (= :path-outside-workspace (get-in err-outside [:error :kind])))))
+
+(deftest run-command-executes-shell-and-captures-output
+  (let [reg (tools/code-tool-registry ".")
+        run-cmd (get reg "run_command")
+        res ((:run run-cmd) {:command "echo dogfood"})
+        err ((:run run-cmd) {:command ""})]
+    (is (zero? (:exit res)))
+    (is (clojure.string/includes? (:out res) "dogfood"))
+    (is (= :invalid-arguments (get-in err [:error :kind])))))
