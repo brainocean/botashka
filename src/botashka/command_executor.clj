@@ -45,19 +45,25 @@
    :content (json/generate-string result)})
 
 (defn- append-observed-event
-  "Appends one observed event using the executor-owned clock."
-  ([run clock event]
-   (run/append-event run (clock) (:type event) (:data event) (:evidence event)))
-  ([run clock type data evidence]
-   (run/append-event run (clock) type data evidence)))
+  "Appends one observed event using the executor-owned clock and notifies on-event if present."
+  ([run clock on-event event]
+   (let [new-run (run/append-event run (clock) (:type event) (:data event) (:evidence event))]
+     (when on-event
+       (on-event (last (:events new-run))))
+     new-run))
+  ([run clock on-event type data evidence]
+   (let [new-run (run/append-event run (clock) type data evidence)]
+     (when on-event
+       (on-event (last (:events new-run))))
+     new-run)))
+
 (defn- append-observed-events
   "Appends observed event descriptions in order with executor-owned timestamps."
-  [run clock events]
-  (reduce (fn [run {:keys [type data evidence]}]
-            (append-observed-event run clock type data evidence))
+  [run clock on-event events]
+  (reduce (fn [r {:keys [type data evidence]}]
+            (append-observed-event r clock on-event type data evidence))
           run
           events))
-
 (defn- normalize-tool-command
   "Normalizes direct tool commands and model-proposed tool calls into a unified shape."
   [command]
@@ -77,7 +83,7 @@
 
 (defn- execute-tool-command
   "Executes one tool command and appends its observed proposal and result events."
-  [run clock command]
+  [run clock on-event command]
   (let [tool-call (normalize-tool-command command)
         origin (:origin tool-call)
         raw-arguments (get-in tool-call [:function :arguments])
@@ -86,21 +92,21 @@
                  (catch Exception error
                    {:error error}))
         run (if-let [args (:arguments parsed)]
-              (append-observed-event run clock
+              (append-observed-event run clock on-event
                                      (run/tool-proposed-event run tool-call args origin))
-              (append-observed-event run clock
+              (append-observed-event run clock on-event
                                      (run/tool-proposed-event run tool-call raw-arguments origin)))
         result (if-let [args (:arguments parsed)]
                  (run-tool tool-call args (:tools run))
                  (tool-error :invalid-arguments tool-call (:error parsed)))
         tool-msg (when (= origin :model)
                    (tool-result-message tool-call result))]
-    (append-observed-event run clock
+    (append-observed-event run clock on-event
                            (run/tool-result-event run tool-call result tool-msg origin))))
 
 (defn command-executor
   "Builds an imperative executor for model, tool, and run commands."
-  [{:keys [complete! clock authorize]
+  [{:keys [complete! complete-streaming! clock authorize on-event]
     :or {authorize (constantly :allow)}}]
   (fn [run command]
     (let [auth (authorize run command)]
@@ -115,41 +121,43 @@
                   arguments (try
                               (json/parse-string (get-in tool-call [:function :arguments]) true)
                               (catch Exception _ nil))
-                  run (append-observed-event run clock
+                  run (append-observed-event run clock on-event
                                              (run/tool-proposed-event run tool-call (or arguments "") origin))
                   err-result {:error {:kind :action-rejected :reason reason}}
                   tool-msg (when (= origin :model)
                              (tool-result-message tool-call err-result))]
-              (append-observed-event run clock
+              (append-observed-event run clock on-event
                                      (run/tool-result-event run tool-call err-result tool-msg origin)))
-            (append-observed-events run clock
+            (append-observed-events run clock on-event
                                     [(run/run-finished-event run :rejected {:reason reason})])))
         (case (:command command)
           :run/start
-          (append-observed-events run clock
+          (append-observed-events run clock on-event
                                   [(run/run-started-event run)
                                    (run/user-submitted-event (:prompt command))])
           :model/complete
           (let [model-req (or (:request command) (dissoc command :command :origin))
                 origin (or (:origin command) :policy)
-                run (append-observed-event run clock (run/model-requested-event run model-req origin))
-                response (complete! model-req)]
+                run (append-observed-event run clock on-event (run/model-requested-event run model-req origin))
+                response (if (and complete-streaming! on-event)
+                           (complete-streaming! model-req (fn [token] (on-event {:type :streaming-token :delta token})))
+                           (complete! model-req))]
             (if-let [err (:error response)]
-              (append-observed-event run clock (run/model-failed-event run err origin))
+              (append-observed-event run clock on-event (run/model-failed-event run err origin))
               (let [message (assistant-message response)
                     tool-calls (:tool_calls message)]
-                (append-observed-event run clock
+                (append-observed-event run clock on-event
                                        (run/model-responded-event run response message tool-calls origin)))))
           :tool/execute
-          (execute-tool-command run clock command)
+          (execute-tool-command run clock on-event command)
           :run/limit
-          (append-observed-events run clock
+          (append-observed-events run clock on-event
                                   [(run/limit-reached-event run)
                                    (run/run-finished-event run :step-limit nil)])
           :run/finish
           (let [result (or (:result command) (get-in (last (:messages run)) [:content]))
                 terminal-status (or (:terminal-status run) :completed)]
-            (append-observed-events run clock
+            (append-observed-events run clock on-event
                                     [(run/run-finished-event
                                       run
                                       terminal-status
@@ -161,5 +169,6 @@
    (default-command-executor {}))
   ([options]
    (command-executor (merge {:complete! model-client/complete!
+                             :complete-streaming! model-client/complete-streaming!
                              :clock #(str (Instant/now))}
                             options))))

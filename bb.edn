@@ -2,6 +2,7 @@
  :deps {metosin/malli {:mvn/version "0.16.4"}}
  :tasks
  {:requires ([botashka.agent :as agent]
+             [botashka.chat :as chat]
              [botashka.tools :as tools]
              [botashka.trace :as trace]
              [clojure.test :refer [run-tests]])
@@ -13,6 +14,10 @@
            (let [r (run-tests 'botashka.agent-test)]
              (when (or (pos? (:fail r)) (pos? (:error r)))
                (System/exit 1))))}
+
+  chat
+  {:doc "Starts an interactive multi-turn REPL chat session with real-time streaming"
+   :task (chat/chat-loop {})}
 
   run
   {:doc "Runs the agent with an optional prompt and --graph/-g switch for execution trace visualization"

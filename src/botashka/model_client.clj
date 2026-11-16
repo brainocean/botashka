@@ -1,6 +1,7 @@
 (ns botashka.model-client
   (:require [babashka.http-client :as http]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [clojure.string :as str]))
 
 (def ^:private base-url
   (or (System/getenv "HAI_BASE_URL")
@@ -133,6 +134,59 @@
       (catch Exception error
         {:error {:kind :network-error
                  :message (.getMessage error)}}))))
+
+(defn complete-streaming!
+  "Sends a streaming completion request to Gemini v1beta, calls `(on-token token)`
+   on incoming text chunks, and returns the aggregated OpenAI-compatible completion response."
+  ([request]
+   (complete-streaming! request nil))
+  ([request on-token]
+   (let [model (or (:model request) default-model)
+         endpoint (str base-url "/models/" model ":streamGenerateContent?alt=sse")]
+     (try
+       (let [response (http/post endpoint
+                                 {:headers {"authorization" (str "Bearer " (api-key))
+                                            "content-type" "application/json"}
+                                  :body (json/generate-string (gemini-request-body request))
+                                  :as :stream
+                                  :throw false
+                                  :timeout 60000})]
+         (if (and (>= (:status response) 200) (< (:status response) 300))
+           (with-open [rdr (clojure.java.io/reader (:body response))]
+             (loop [lines (line-seq rdr)
+                    accumulated-parts []
+                    last-data nil]
+               (if-let [line (first lines)]
+                 (if (str/starts-with? line "data: ")
+                   (let [data-str (subs line 6)
+                         data (try (json/parse-string data-str true)
+                                   (catch Exception _ nil))
+                         parts (get-in data [:candidates 0 :content :parts])]
+                     (doseq [part parts]
+                       (when-let [t (:text part)]
+                         (when (and on-token (seq t))
+                           (on-token t))))
+                     (recur (rest lines)
+                            (into accumulated-parts parts)
+                            (or data last-data)))
+                   (recur (rest lines) accumulated-parts last-data))
+                 (let [finish-reason (or (get-in last-data [:candidates 0 :finishReason]) "STOP")
+                       candidate {:content {:parts accumulated-parts}
+                                  :finishReason finish-reason}
+                       final-response (assoc last-data :candidates [candidate])]
+                   (normalize-gemini-response model final-response)))))
+           (try
+             (let [body-str (slurp (:body response))
+                   err-data (try (json/parse-string body-str true) (catch Exception _ nil))]
+               {:error {:kind :provider-error
+                        :status (:status response)
+                        :details (or err-data body-str)}})
+             (catch Exception _
+               {:error {:kind :provider-error
+                        :status (:status response)}}))))
+       (catch Exception error
+         {:error {:kind :network-error
+                  :message (.getMessage error)}})))))
 
 (defn complete-text!
   "Returns the first assistant text and response metadata from a completion."

@@ -5,6 +5,7 @@
             [botashka.tools :as tools]
             [botashka.trace :as trace]
             [botashka.workspace :as ws]
+            [clojure.core.async :as async]
             [clojure.test :refer [deftest is testing]]))
 
 (defn- test-command-executor
@@ -501,3 +502,53 @@
     (is (= :path-outside-workspace (get-in outside [:error :kind])))
     (is (= :path-not-found (get-in not-found [:error :kind])))
     (is (= :invalid-arguments (get-in empty-required [:error :kind])))))
+
+(deftest agent-run-publishes-events-to-core-async-channel
+  (let [event-ch (async/chan 20)
+        fake-complete (fn [_]
+                        {:choices [{:message {:role "assistant"
+                                              :content "test response"}}]})
+        executor (command-executor/command-executor
+                  {:complete! fake-complete
+                   :clock (constantly "2026-11-16T10:00:00Z")
+                   :on-event #(async/>!! event-ch %)})
+        res (agent/run! {:command-executor! executor
+                         :prompt "hello"
+                         :event-chan event-ch
+                         :tools {}})]
+    (is (= :completed (:status res)))
+    (let [events (loop [acc []]
+                   (if-let [e (async/<!! event-ch)]
+                     (recur (conj acc e))
+                     acc))]
+      (is (= [:run-started :user-submitted :model-requested :model-responded :run-finished]
+             (mapv :type events)))
+      ;; Channel is closed at end of run
+      (is (nil? (async/<!! event-ch))))))
+
+(deftest agent-run-publishes-streaming-tokens-when-streaming-complete-provided
+  (let [event-ch (async/chan 20)
+        fake-streaming (fn [_ on-token]
+                         (on-token "Hello ")
+                         (on-token "streaming ")
+                         (on-token "world")
+                         {:choices [{:message {:role "assistant"
+                                               :content "Hello streaming world"}}]})
+        executor (command-executor/command-executor
+                  {:complete! (fn [_] (throw (ex-info "Should use complete-streaming!" {})))
+                   :complete-streaming! fake-streaming
+                   :clock (constantly "2026-11-16T10:00:00Z")
+                   :on-event #(async/>!! event-ch %)})
+        res (agent/run! {:command-executor! executor
+                         :prompt "test streaming"
+                         :event-chan event-ch
+                         :tools {}})]
+    (is (= :completed (:status res)))
+    (let [events (loop [acc []]
+                   (if-let [e (async/<!! event-ch)]
+                     (recur (conj acc e))
+                     acc))
+          token-events (filter #(= (:type %) :streaming-token) events)]
+      (is (= 3 (count token-events)))
+      (is (= ["Hello " "streaming " "world"]
+             (mapv :delta token-events))))))

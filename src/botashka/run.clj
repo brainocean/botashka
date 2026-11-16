@@ -9,14 +9,14 @@
 
 (defn new-run
   "Creates an unstarted immutable agent run from explicit options."
-  [{:keys [run-id system tools max-turns]}]
+  [{:keys [run-id system tools max-turns messages]}]
   {:id run-id
    :system system
    :tools tools
    :max-turns max-turns
    :turn 0
    :status :new
-   :messages []
+   :messages (or messages [])
    :events []
    :pending-tool-calls []})
 
