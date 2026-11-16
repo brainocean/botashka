@@ -5,7 +5,8 @@
         cheshire/cheshire {:mvn/version "6.2.0"}
         metosin/malli {:mvn/version "0.16.4"}
         org.babashka/http-client {:mvn/version "0.4.25"}
-        org.clojure/core.async {:mvn/version "1.6.681"}}
+        org.clojure/core.async {:mvn/version "1.6.681"}
+        org.clojure/core.match {:mvn/version "1.1.0"}}
 
  :aliases
  {:repl {:main-opts ["-e" "(require 'botashka.agent 'botashka.model-client 'botashka.tools)"]}}}

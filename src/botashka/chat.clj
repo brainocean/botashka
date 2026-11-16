@@ -3,6 +3,7 @@
             [botashka.agent :as agent]
             [botashka.tools :as tools]
             [clojure.core.async :as async]
+            [clojure.core.match :refer [match]]
             [clojure.string :as str]))
 
 (def ^:private ansi-reset "\u001b[0m")
@@ -17,48 +18,47 @@
   (if (map? args)
     (str/join " " (map (fn [[k v]] (str (name k) "=" (pr-str v))) args))
     (pr-str args)))
-
 (defn- consume-events!
   "Consumes the event channel in the current thread and renders streaming outputs."
   [event-chan]
   (let [in-stream? (atom false)]
     (loop []
       (when-let [event (async/<!! event-chan)]
-        (case (:type event)
-          :streaming-token
+        (match event
+          {:type :streaming-token :delta delta}
           (do
             (reset! in-stream? true)
-            (print (:delta event))
+            (print delta)
             (flush))
 
-          :tool-proposed
+          {:type :tool-proposed :data {:tool tool} :evidence {:arguments args}}
           (do
             (when @in-stream?
               (println)
               (reset! in-stream? false))
-            (println (str ansi-yellow "● Tool: " ansi-bold (get-in event [:data :tool]) ansi-reset
-                          ansi-dim " " (format-tool-args (get-in event [:evidence :arguments])) ansi-reset)))
+            (println (str ansi-yellow "● Tool: " ansi-bold tool ansi-reset
+                          ansi-dim " " (format-tool-args args) ansi-reset)))
 
-          :tool-result
-          (let [outcome (get-in event [:data :outcome])
-                err (get-in event [:evidence :result :error])]
-            (if (= outcome :ok)
-              (println (str ansi-green "  ✔ Result: :ok" ansi-reset))
-              (println (str ansi-red "  ✖ Error: " (or (:kind err) outcome)
-                            (when-let [msg (:message err)] (str " - " msg)) ansi-reset))))
+          {:type :tool-result :data {:outcome :ok}}
+          (println (str ansi-green "  ✔ Result: :ok" ansi-reset))
 
-          :model-failed
-          (println (str ansi-red "✖ Model error: " (get-in event [:data :error]) ansi-reset))
+          {:type :tool-result :evidence {:result {:error {:kind kind :message msg}}}}
+          (println (str ansi-red "  ✖ Error: " kind " - " msg ansi-reset))
 
-          :run-finished
+          {:type :tool-result :evidence {:result {:error {:kind kind}}}}
+          (println (str ansi-red "  ✖ Error: " kind ansi-reset))
+
+          {:type :model-failed :data {:error err}}
+          (println (str ansi-red "✖ Model error: " err ansi-reset))
+
+          {:type :run-finished :data {:status status :turn turn}}
           (do
             (when @in-stream?
               (println)
               (reset! in-stream? false))
-            (println (str ansi-dim "─ (" (get-in event [:data :status]) ", turn: " (get-in event [:data :turn]) ")" ansi-reset "\n")))
+            (println (str ansi-dim "─ (" status ", turn: " turn ")" ansi-reset "\n")))
 
-          ;; other canonical events pass silently
-          nil)
+          :else nil)
         (recur)))))
 
 (defn- default-system [workspace]
