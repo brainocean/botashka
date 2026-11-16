@@ -1,7 +1,8 @@
 (ns botashka.command-executor
   (:require [botashka.model-client :as model-client]
             [botashka.run :as run]
-            [cheshire.core :as json])
+            [cheshire.core :as json]
+            [clojure.core.match :refer [match]])
   (:import [java.time Instant]))
 
 (defn- assistant-message
@@ -104,64 +105,86 @@
     (append-observed-event run clock on-event
                            (run/tool-result-event run tool-call result tool-msg origin))))
 
+(defn- authorized? [auth]
+  (or (= auth :allow)
+      (true? auth)
+      (= (:decision auth) :allow)))
+
+(defn- rejection-reason [auth]
+  (or (when (map? auth) (:reason auth))
+      "Command rejected by authorization policy"))
+
+(defn- handle-rejected-tool
+  [run clock on-event command reason]
+  (let [tool-call (normalize-tool-command command)
+        origin (:origin tool-call)
+        arguments (try
+                    (json/parse-string (get-in tool-call [:function :arguments]) true)
+                    (catch Exception _ nil))
+        run (append-observed-event run clock on-event
+                                   (run/tool-proposed-event run tool-call (or arguments "") origin))
+        err-result {:error {:kind :action-rejected :reason reason}}
+        tool-msg (when (= origin :model)
+                   (tool-result-message tool-call err-result))]
+    (append-observed-event run clock on-event
+                           (run/tool-result-event run tool-call err-result tool-msg origin))))
+
 (defn command-executor
-  "Builds an imperative executor for model, tool, and run commands."
+  "Builds an imperative executor for model, tool, and run commands using structural pattern matching."
   [{:keys [complete! complete-streaming! clock authorize on-event]
     :or {authorize (constantly :allow)}}]
   (fn [run command]
     (let [auth (authorize run command)]
-      (if (and (not= auth :allow)
-               (not= (:decision auth) :allow)
-               (not (true? auth)))
-        (let [reason (or (when (map? auth) (:reason auth))
-                         "Command rejected by authorization policy")]
-          (if (= (:command command) :tool/execute)
-            (let [tool-call (normalize-tool-command command)
-                  origin (:origin tool-call)
-                  arguments (try
-                              (json/parse-string (get-in tool-call [:function :arguments]) true)
-                              (catch Exception _ nil))
-                  run (append-observed-event run clock on-event
-                                             (run/tool-proposed-event run tool-call (or arguments "") origin))
-                  err-result {:error {:kind :action-rejected :reason reason}}
-                  tool-msg (when (= origin :model)
-                             (tool-result-message tool-call err-result))]
+      (match [(authorized? auth) (:command command)]
+        ;; 1. Rejected tool execution
+        [false :tool/execute]
+        (handle-rejected-tool run clock on-event command (rejection-reason auth))
+
+        ;; 2. Other rejected commands -> terminal rejection
+        [false _]
+        (append-observed-events run clock on-event
+                                [(run/run-finished-event run :rejected {:reason (rejection-reason auth)})])
+
+        ;; 3. Run start
+        [true :run/start]
+        (append-observed-events run clock on-event
+                                [(run/run-started-event run)
+                                 (run/user-submitted-event (:prompt command))])
+
+        ;; 4. Model completion
+        [true :model/complete]
+        (let [model-req (or (:request command) (dissoc command :command :origin))
+              origin (or (:origin command) :policy)
+              run (append-observed-event run clock on-event (run/model-requested-event run model-req origin))
+              response (if (and complete-streaming! on-event)
+                         (complete-streaming! model-req (fn [token] (on-event {:type :streaming-token :delta token})))
+                         (complete! model-req))]
+          (if-let [err (:error response)]
+            (append-observed-event run clock on-event (run/model-failed-event run err origin))
+            (let [message (assistant-message response)
+                  tool-calls (:tool_calls message)]
               (append-observed-event run clock on-event
-                                     (run/tool-result-event run tool-call err-result tool-msg origin)))
-            (append-observed-events run clock on-event
-                                    [(run/run-finished-event run :rejected {:reason reason})])))
-        (case (:command command)
-          :run/start
+                                     (run/model-responded-event run response message tool-calls origin)))))
+
+        ;; 5. Tool execution
+        [true :tool/execute]
+        (execute-tool-command run clock on-event command)
+
+        ;; 6. Run turn limit reached
+        [true :run/limit]
+        (append-observed-events run clock on-event
+                                [(run/limit-reached-event run)
+                                 (run/run-finished-event run :step-limit nil)])
+
+        ;; 7. Run finish
+        [true :run/finish]
+        (let [result (or (:result command) (get-in (last (:messages run)) [:content]))
+              terminal-status (or (:terminal-status run) :completed)]
           (append-observed-events run clock on-event
-                                  [(run/run-started-event run)
-                                   (run/user-submitted-event (:prompt command))])
-          :model/complete
-          (let [model-req (or (:request command) (dissoc command :command :origin))
-                origin (or (:origin command) :policy)
-                run (append-observed-event run clock on-event (run/model-requested-event run model-req origin))
-                response (if (and complete-streaming! on-event)
-                           (complete-streaming! model-req (fn [token] (on-event {:type :streaming-token :delta token})))
-                           (complete! model-req))]
-            (if-let [err (:error response)]
-              (append-observed-event run clock on-event (run/model-failed-event run err origin))
-              (let [message (assistant-message response)
-                    tool-calls (:tool_calls message)]
-                (append-observed-event run clock on-event
-                                       (run/model-responded-event run response message tool-calls origin)))))
-          :tool/execute
-          (execute-tool-command run clock on-event command)
-          :run/limit
-          (append-observed-events run clock on-event
-                                  [(run/limit-reached-event run)
-                                   (run/run-finished-event run :step-limit nil)])
-          :run/finish
-          (let [result (or (:result command) (get-in (last (:messages run)) [:content]))
-                terminal-status (or (:terminal-status run) :completed)]
-            (append-observed-events run clock on-event
-                                    [(run/run-finished-event
-                                      run
-                                      terminal-status
-                                      {:final-answer result})])))))))
+                                  [(run/run-finished-event
+                                    run
+                                    terminal-status
+                                    {:final-answer result})]))))))
 
 (defn default-command-executor
   "Builds the command executor used by a normal local agent run."
