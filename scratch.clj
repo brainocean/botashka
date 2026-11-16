@@ -110,7 +110,7 @@
     :tools (tools/code-tool-registry ".")})
 
   ;; Run the read-file code artifact as a separate Babashka process.
-  (tool-runtime/run! "tools/read-file.clj"
+  (tool-runtime/run! "tools/read_file.clj"
                      {:workspace "."
                       :path "README.md"})
 
