@@ -1,5 +1,6 @@
 (ns botashka.chat
-  (:require [botashka.agent :as agent]
+  (:require [babashka.fs :as fs]
+            [botashka.agent :as agent]
             [botashka.tools :as tools]
             [clojure.core.async :as async]
             [clojure.string :as str]))
@@ -60,11 +61,17 @@
           nil)
         (recur)))))
 
-(defn- banner []
-  (let [model (or (System/getenv "BOTASHKA_MODEL") "gemini-3.1-flash-lite")
-        tools (tools/code-tool-registry ".")]
+(defn- default-system [workspace]
+  (str "You are Botashka, an expert coding agent. "
+       "You are operating inside the workspace directory: " workspace ". "
+       "All file operations (read_file, write_file, search_text, list_files) must use paths relative to this workspace root. "
+       "run_command executes shell commands directly within this workspace root directory."))
+
+(defn- banner [workspace registry]
+  (let [model (or (System/getenv "BOTASHKA_MODEL") "gemini-3.1-flash-lite")]
     (println (str ansi-bold ansi-cyan "🤖 Botashka Interactive Coding Agent" ansi-reset))
-    (println (str ansi-dim "Model: " model " | Tools: " (str/join ", " (sort (keys tools))) ansi-reset))
+    (println (str ansi-bold "Workspace: " ansi-reset ansi-cyan workspace ansi-reset))
+    (println (str ansi-dim "Model: " model " | Tools: " (str/join ", " (sort (keys registry))) ansi-reset))
     (println (str ansi-dim "Type your prompt to start, or 'exit' / 'quit' to end session." ansi-reset "\n"))))
 
 (defn chat-loop
@@ -72,37 +79,41 @@
   ([] (chat-loop {}))
   ([{:keys [workspace system max-turns]
      :or {workspace "." max-turns 15}}]
-   (banner)
-   (let [registry (tools/code-tool-registry workspace)]
-     (loop [messages []
-            turn-count 1]
-       (print (str ansi-bold ansi-cyan "botashka [" turn-count "]> " ansi-reset))
-       (flush)
-       (if-let [input (read-line)]
-         (let [trimmed (str/trim input)]
-           (cond
-             (or (empty? trimmed) (= trimmed "exit") (= trimmed "quit") (= trimmed ":q"))
-             (println (str ansi-dim "Goodbye!" ansi-reset))
+   (let [canonical-ws (str (fs/canonicalize (or workspace ".")))]
+     (when-not (fs/exists? canonical-ws)
+       (fs/create-dirs canonical-ws))
+     (let [registry (tools/code-tool-registry canonical-ws)
+           system-prompt (or system (default-system canonical-ws))]
+       (banner canonical-ws registry)
+       (loop [messages []
+              turn-count 1]
+         (print (str ansi-bold ansi-cyan "botashka [" turn-count "]> " ansi-reset))
+         (flush)
+         (if-let [input (read-line)]
+           (let [trimmed (str/trim input)]
+             (cond
+               (or (empty? trimmed) (= trimmed "exit") (= trimmed "quit") (= trimmed ":q"))
+               (println (str ansi-dim "Goodbye!" ansi-reset))
 
-             :else
-             (let [event-chan (async/chan 100)
-                   run-future (future
-                                (try
-                                  (agent/run! {:prompt trimmed
-                                               :messages messages
-                                               :system system
-                                               :tools registry
-                                               :max-turns max-turns
-                                               :event-chan event-chan})
-                                  (catch Exception error
-                                    (async/close! event-chan)
-                                    {:error error})))]
-               (consume-events! event-chan)
-               (let [result @run-future]
-                 (if (:error result)
-                   (do
-                     (println (str ansi-red "Execution error: " (.getMessage (:error result)) ansi-reset))
-                     (recur messages turn-count))
-                   (recur (or (:messages result) messages) (inc turn-count)))))))
-         ;; EOF (Ctrl+D)
-         (println (str "\n" ansi-dim "Goodbye!" ansi-reset)))))))
+               :else
+               (let [event-chan (async/chan 100)
+                     run-future (future
+                                  (try
+                                    (agent/run! {:prompt trimmed
+                                                 :messages messages
+                                                 :system system-prompt
+                                                 :tools registry
+                                                 :max-turns max-turns
+                                                 :event-chan event-chan})
+                                    (catch Exception error
+                                      (async/close! event-chan)
+                                      {:error error})))]
+                 (consume-events! event-chan)
+                 (let [result @run-future]
+                   (if (:error result)
+                     (do
+                       (println (str ansi-red "Execution error: " (.getMessage (:error result)) ansi-reset))
+                       (recur messages turn-count))
+                     (recur (or (:messages result) messages) (inc turn-count)))))))
+           ;; EOF (Ctrl+D)
+           (println (str "\n" ansi-dim "Goodbye!" ansi-reset))))))))
