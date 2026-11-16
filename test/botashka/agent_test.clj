@@ -1,6 +1,7 @@
 (ns botashka.agent-test
   (:require [botashka.agent :as agent]
             [botashka.command-executor :as command-executor]
+            [botashka.model-client :as model-client]
             [botashka.run :as run]
             [botashka.tools :as tools]
             [botashka.trace :as trace]
@@ -552,3 +553,32 @@
       (is (= 3 (count token-events)))
       (is (= ["Hello " "streaming " "world"]
              (mapv :delta token-events))))))
+
+(deftest sse-events-seq-frames-multiline-data-and-comments
+  (let [lines ["data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"one \"}]}}]}"
+               ""
+               ": heartbeat comment"
+               "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"two\"}]}}]}"
+               ""
+               "data: {\"candidates\": [{\"finishReason\": \"STOP\"}], \"usageMetadata\": {\"totalTokenCount\": 10}}"
+               ""]
+        events (into [] (model-client/sse-events-seq lines))]
+    (is (= 3 (count events)))
+    (is (clojure.string/includes? (first events) "one"))
+    (is (clojure.string/includes? (second events) "two"))))
+
+(deftest parse-stream-events-accumulates-tokens-and-response
+  (let [lines ["data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Hello \"}]}}]}"
+               ""
+               "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"world!\"}]}}]}"
+               ""
+               "data: {\"candidates\": [{\"finishReason\": \"STOP\"}], \"responseId\": \"resp-999\", \"modelVersion\": \"gemini-test\", \"usageMetadata\": {\"totalTokenCount\": 20}}"
+               ""]
+        tokens (atom [])
+        resp (model-client/parse-stream-events "gemini-test" lines (fn [t] (swap! tokens conj t)))]
+    (is (= ["Hello " "world!"] @tokens))
+    (is (= "Hello world!" (get-in resp [:choices 0 :message :content])))
+    (is (= "stop" (get-in resp [:choices 0 :finish_reason])))
+    (is (= "resp-999" (:id resp)))
+    (is (= "gemini-test" (:model resp)))
+    (is (= 20 (get-in resp [:usage :totalTokenCount])))))

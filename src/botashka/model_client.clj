@@ -83,7 +83,7 @@
 (defn- parse-gemini-candidate
   [candidate]
   (let [parts (get-in candidate [:content :parts])
-        text (->> parts (keep :text) (clojure.string/join "\n"))
+        text (apply str (keep :text parts))
         function-calls (->> parts (keep :functionCall))
         thought-sig (->> parts (keep :thoughtSignature) first)
         tool-calls (when (seq function-calls)
@@ -143,6 +143,91 @@
         {:error {:kind :network-error
                  :message (.getMessage error)}}))))
 
+(defn sse-events-seq
+  "Transforms a sequence of SSE lines into a lazy sequence of raw event data strings.
+   Handles multiple data: lines per event, skips comments and empty lines."
+  [lines]
+  (let [step (fn step [ls current-data]
+               (lazy-seq
+                 (if-let [line (first ls)]
+                   (cond
+                     (str/blank? line)
+                     (if (seq current-data)
+                       (cons (str/join "\n" current-data)
+                             (step (rest ls) []))
+                       (step (rest ls) []))
+
+                     (str/starts-with? line "data: ")
+                     (step (rest ls) (conj current-data (subs line 6)))
+
+                     (str/starts-with? line ":")
+                     (step (rest ls) current-data)
+
+                     :else
+                     (step (rest ls) current-data))
+                   (when (seq current-data)
+                     [(str/join "\n" current-data)]))))]
+    (step lines [])))
+
+(def ^:private sse-decode-xf
+  (comp
+    (keep (fn [payload]
+            (try
+              (json/parse-string payload true)
+              (catch Exception error
+                {:error {:kind :invalid-json
+                         :message (.getMessage error)
+                         :payload payload}}))))
+    (take-while #(not (:error %)))))
+
+(defn- extract-text-deltas [event]
+  (keep :text (get-in event [:candidates 0 :content :parts])))
+
+(defn- apply-stream-event
+  [state event]
+  (if-let [err (:error event)]
+    (reduced {:error err})
+    (let [candidate (get-in event [:candidates 0])
+          parts (get-in candidate [:content :parts])
+          finish-reason (:finishReason candidate)
+          response-id (:responseId event)
+          model-version (:modelVersion event)
+          usage (:usageMetadata event)]
+      (cond-> (update state :parts into (or parts []))
+        finish-reason (assoc :finish-reason finish-reason)
+        response-id (assoc :response-id response-id)
+        model-version (assoc :model-version model-version)
+        usage (assoc :usage usage)))))
+
+(defn- finalize-stream-response
+  [model state]
+  (if (:error state)
+    state
+    (let [finish-reason (or (:finish-reason state) "STOP")
+          candidate {:content {:parts (:parts state)}
+                     :finishReason finish-reason}
+          response-map {:candidates [candidate]
+                        :responseId (:response-id state)
+                        :modelVersion (:model-version state)
+                        :usageMetadata (:usage state)}]
+      (normalize-gemini-response model response-map))))
+
+(defn parse-stream-events
+  "Purely parses SSE line sequences via transducers, invokes on-token for text deltas,
+   and accumulates the final normalized model completion response."
+  [model lines on-token]
+  (let [stream-reducer (fn [state event]
+                         (when on-token
+                           (doseq [t (extract-text-deltas event)]
+                             (when (seq t)
+                               (on-token t))))
+                         (apply-stream-event state event))
+        initial-state {:parts []}]
+    (transduce sse-decode-xf
+               (completing stream-reducer (partial finalize-stream-response model))
+               initial-state
+               (sse-events-seq lines))))
+
 (defn complete-streaming!
   "Sends a streaming completion request to Gemini v1beta, calls `(on-token token)`
    on incoming text chunks, and returns the aggregated OpenAI-compatible completion response."
@@ -161,37 +246,13 @@
                                   :timeout 60000})]
          (if (and (>= (:status response) 200) (< (:status response) 300))
            (with-open [rdr (clojure.java.io/reader (:body response))]
-             (loop [lines (line-seq rdr)
-                    accumulated-parts []
-                    last-data nil]
-               (if-let [line (first lines)]
-                 (if (str/starts-with? line "data: ")
-                   (let [data-str (subs line 6)
-                         data (try (json/parse-string data-str true)
-                                   (catch Exception _ nil))
-                         parts (get-in data [:candidates 0 :content :parts])]
-                     (doseq [part parts]
-                       (when-let [t (:text part)]
-                         (when (and on-token (seq t))
-                           (on-token t))))
-                     (recur (rest lines)
-                            (into accumulated-parts parts)
-                            (or data last-data)))
-                   (recur (rest lines) accumulated-parts last-data))
-                 (let [finish-reason (or (get-in last-data [:candidates 0 :finishReason]) "STOP")
-                       candidate {:content {:parts accumulated-parts}
-                                  :finishReason finish-reason}
-                       final-response (assoc last-data :candidates [candidate])]
-                   (normalize-gemini-response model final-response)))))
-           (try
-             (let [body-str (slurp (:body response))
+             (parse-stream-events model (line-seq rdr) on-token))
+           (with-open [body-stream (:body response)]
+             (let [body-str (slurp body-stream)
                    err-data (try (json/parse-string body-str true) (catch Exception _ nil))]
                {:error {:kind :provider-error
                         :status (:status response)
-                        :details (or err-data body-str)}})
-             (catch Exception _
-               {:error {:kind :provider-error
-                        :status (:status response)}}))))
+                        :details (or err-data body-str)}}))))
        (catch Exception error
          {:error {:kind :network-error
                   :message (.getMessage error)}})))))
