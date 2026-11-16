@@ -1,4 +1,5 @@
-(ns botashka.run)
+(ns botashka.run
+  (:require [clojure.core.match :refer [match]]))
 
 (defn build-model-context
   "Purely projects the model invocation parameters (context projection) from current run state."
@@ -111,31 +112,28 @@
         (update :events conj event)
         (apply-event event))))
 
-(def ^:private status-action-rules
-  {:awaiting-model
-   (fn [run]
-     (if (>= (:turn run) (:max-turns run))
-       {:command :run/limit}
-       (merge {:command :model/complete
-               :origin :policy}
-              (build-model-context run))))
-
-   :awaiting-tools
-   (fn [run]
-     (when-let [tc (first (:pending-tool-calls run))]
-       {:command :tool/execute
-        :tool-call tc
-        :origin :model}))
-
-   :ready-to-finish
-   (constantly {:command :run/finish})})
-
 (defn default-action-policy
   "Default action policy: drives model completions and processes pending assistant tool calls
-   using data-driven status action rules."
+   using structural pattern matching across run status, turn limits, and pending calls."
   [run]
-  (when-let [rule (get status-action-rules (:status run))]
-    (rule run)))
+  (match [(:status run) (>= (:turn run) (:max-turns run)) (:pending-tool-calls run)]
+    [:awaiting-model true _]
+    {:command :run/limit}
+
+    [:awaiting-model false _]
+    (merge {:command :model/complete
+            :origin :policy}
+           (build-model-context run))
+
+    [:awaiting-tools _ ([tc & _] :seq)]
+    {:command :tool/execute
+     :tool-call tc
+     :origin :model}
+
+    [:ready-to-finish _ _]
+    {:command :run/finish}
+
+    :else nil))
 
 (defn first-applicable-action-policy
   "Combines multiple action policies by evaluating them in order.
