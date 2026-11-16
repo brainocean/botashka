@@ -371,13 +371,16 @@
                              {:seq 3 :type :model-responded :data {:model "test" :finish-reason "stop"}
                               :evidence {:assistant-message {:content "hi"}}}
                              {:seq 4 :type :run-finished :data {:status :completed}}]}
+        lines (trace/trace-lines sample-result)
         output (with-out-str (trace/render-trace-graph sample-result))]
+    (is (vector? lines))
+    (is (some #(clojure.string/includes? % "┌── [0] :run-started") lines))
+    (is (some #(clojure.string/includes? % "└── [4] :run-finished") lines))
     (is (clojure.string/includes? output "Execution Trace Graph"))
     (is (clojure.string/includes? output ":run-started"))
     (is (clojure.string/includes? output ":user-submitted"))
     (is (clojure.string/includes? output ":model-requested"))
     (is (clojure.string/includes? output ":run-finished"))))
-
 (deftest model-command-projection-and-execution-with-origin
   (let [run (-> (run/new-run {:run-id "r-ctx" :system "Sys" :max-turns 4})
                 (update :messages conj {:role "user" :content "Hello"}))
