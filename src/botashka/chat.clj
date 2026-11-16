@@ -18,48 +18,94 @@
   (if (map? args)
     (str/join " " (map (fn [[k v]] (str (name k) "=" (pr-str v))) args))
     (pr-str args)))
+
+(defn event->display-item
+  "Purely projects a canonical or ephemeral run event into a decoupled display item map,
+   or returns nil if the event is non-visual."
+  [event]
+  (match event
+    {:type :streaming-token :delta delta}
+    {:kind :token :delta delta}
+
+    {:type :tool-proposed :data {:tool tool} :evidence {:arguments args}}
+    {:kind :tool-proposed :tool tool :args (format-tool-args args)}
+
+    {:type :tool-result :data {:outcome :ok}}
+    {:kind :tool-result :outcome :ok}
+
+    {:type :tool-result :evidence {:result {:error {:kind kind :message msg}}}}
+    {:kind :tool-error :error-kind kind :message msg}
+
+    {:type :tool-result :evidence {:result {:error {:kind kind}}}}
+    {:kind :tool-error :error-kind kind}
+
+    {:type :model-failed :data {:error err}}
+    {:kind :model-failed :error err}
+
+    {:type :run-finished :data {:status status :turn turn}}
+    {:kind :run-finished :status status :turn turn}
+
+    :else nil))
+
+(def display-items-xf
+  "Transducer that filters non-visual events and maps them to pure display items."
+  (keep event->display-item))
+
+(defn- render-display-item!
+  "Terminal shell effect that updates in-stream state and prints the display item."
+  [in-stream? item]
+  (match item
+    {:kind :token :delta delta}
+    (do
+      (reset! in-stream? true)
+      (print delta)
+      (flush))
+
+    {:kind :tool-proposed :tool tool :args args-str}
+    (do
+      (when @in-stream?
+        (println)
+        (reset! in-stream? false))
+      (println (str ansi-yellow "● Tool: " ansi-bold tool ansi-reset
+                    ansi-dim " " args-str ansi-reset)))
+
+    {:kind :tool-result :outcome :ok}
+    (println (str ansi-green "  ✔ Result: :ok" ansi-reset))
+
+    {:kind :tool-error :error-kind kind :message msg}
+    (println (str ansi-red "  ✖ Error: " kind " - " msg ansi-reset))
+
+    {:kind :tool-error :error-kind kind}
+    (println (str ansi-red "  ✖ Error: " kind ansi-reset))
+
+    {:kind :model-failed :error err}
+    (println (str ansi-red "✖ Model error: " err ansi-reset))
+
+    {:kind :run-finished :status status :turn turn}
+    (do
+      (when @in-stream?
+        (println)
+        (reset! in-stream? false))
+      (println (str ansi-dim "─ (" status ", turn: " turn ")" ansi-reset "\n")))
+
+    :else nil))
+
+(defn- channel-seq
+  "Produces a lazy sequence that pulls from a core.async channel until closed."
+  [ch]
+  (lazy-seq
+    (when-let [v (async/<!! ch)]
+      (cons v (channel-seq ch)))))
+
 (defn- consume-events!
   "Consumes the event channel in the current thread and renders streaming outputs."
   [event-chan]
   (let [in-stream? (atom false)]
-    (loop []
-      (when-let [event (async/<!! event-chan)]
-        (match event
-          {:type :streaming-token :delta delta}
-          (do
-            (reset! in-stream? true)
-            (print delta)
-            (flush))
-
-          {:type :tool-proposed :data {:tool tool} :evidence {:arguments args}}
-          (do
-            (when @in-stream?
-              (println)
-              (reset! in-stream? false))
-            (println (str ansi-yellow "● Tool: " ansi-bold tool ansi-reset
-                          ansi-dim " " (format-tool-args args) ansi-reset)))
-
-          {:type :tool-result :data {:outcome :ok}}
-          (println (str ansi-green "  ✔ Result: :ok" ansi-reset))
-
-          {:type :tool-result :evidence {:result {:error {:kind kind :message msg}}}}
-          (println (str ansi-red "  ✖ Error: " kind " - " msg ansi-reset))
-
-          {:type :tool-result :evidence {:result {:error {:kind kind}}}}
-          (println (str ansi-red "  ✖ Error: " kind ansi-reset))
-
-          {:type :model-failed :data {:error err}}
-          (println (str ansi-red "✖ Model error: " err ansi-reset))
-
-          {:type :run-finished :data {:status status :turn turn}}
-          (do
-            (when @in-stream?
-              (println)
-              (reset! in-stream? false))
-            (println (str ansi-dim "─ (" status ", turn: " turn ")" ansi-reset "\n")))
-
-          :else nil)
-        (recur)))))
+    (transduce display-items-xf
+               (completing (fn [_ item]
+                             (render-display-item! in-stream? item)))
+               nil
+               (channel-seq event-chan))))
 
 (defn- default-system [workspace]
   (str "You are Botashka, an expert coding agent. "

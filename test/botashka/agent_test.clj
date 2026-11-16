@@ -1,5 +1,6 @@
 (ns botashka.agent-test
   (:require [botashka.agent :as agent]
+            [botashka.chat :as chat]
             [botashka.command-executor :as command-executor]
             [botashka.model-client :as model-client]
             [botashka.run :as run]
@@ -582,3 +583,21 @@
     (is (= "resp-999" (:id resp)))
     (is (= "gemini-test" (:model resp)))
     (is (= 20 (get-in resp [:usage :totalTokenCount])))))
+
+(deftest event-to-display-item-projects-canonical-and-streaming-events
+  (is (= {:kind :token :delta "abc"}
+         (chat/event->display-item {:type :streaming-token :delta "abc"})))
+  (is (= {:kind :tool-proposed :tool "read_file" :args "path=\"foo\""}
+         (chat/event->display-item {:type :tool-proposed
+                                    :data {:tool "read_file"}
+                                    :evidence {:arguments {:path "foo"}}})))
+  (is (= {:kind :tool-result :outcome :ok}
+         (chat/event->display-item {:type :tool-result :data {:outcome :ok}})))
+  (is (= {:kind :tool-error :error-kind :not-found :message "missing file"}
+         (chat/event->display-item {:type :tool-result
+                                    :evidence {:result {:error {:kind :not-found :message "missing file"}}}})))
+  (is (= {:kind :model-failed :error {:kind :rate-limit}}
+         (chat/event->display-item {:type :model-failed :data {:error {:kind :rate-limit}}})))
+  (is (= {:kind :run-finished :status :completed :turn 3}
+         (chat/event->display-item {:type :run-finished :data {:status :completed :turn 3}})))
+  (is (nil? (chat/event->display-item {:type :run-started}))))
