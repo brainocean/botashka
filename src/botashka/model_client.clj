@@ -1,6 +1,7 @@
 (ns botashka.model-client
   (:require [babashka.http-client :as http]
             [cheshire.core :as json]
+            [clojure.core.match :refer [match]]
             [clojure.string :as str]))
 
 (def ^:private base-url
@@ -17,43 +18,50 @@
       (System/getenv "GEMINI_API_KEY")
       (throw (ex-info "HAI_PROXY_API_KEY or GEMINI_API_KEY is not set"
                       {:kind :missing-api-key}))))
+(defn- tool-call-parts
+  [tool-calls thought-sig]
+  (mapv (fn [tc]
+          (cond-> {:functionCall
+                   {:name (get-in tc [:function :name])
+                    :id (:id tc)
+                    :args (try
+                            (json/parse-string (get-in tc [:function :arguments]) true)
+                            (catch Exception _ {}))}}
+            thought-sig (assoc :thoughtSignature thought-sig)))
+        tool-calls))
+
+(defn- gemini-message
+  [msg]
+  (match msg
+    {:role "tool" :content content}
+    {:role "user"
+     :parts [{:functionResponse
+              {:name (or (:tool_call_id msg) "tool")
+               :response (try
+                           (json/parse-string content true)
+                           (catch Exception _
+                             {:result content}))}}]}
+
+    {:role "assistant" :content content :tool_calls ([_ & _] :seq)}
+    {:role "model"
+     :parts (into (if (seq content) [{:text content}] [])
+                  (tool-call-parts (:tool_calls msg) (:thought_signature msg)))}
+
+    {:role "assistant" :tool_calls ([_ & _] :seq)}
+    {:role "model"
+     :parts (tool-call-parts (:tool_calls msg) (:thought_signature msg))}
+
+    {:role "assistant" :content content}
+    {:role "model"
+     :parts (if (seq content) [{:text content}] [])}
+
+    {:content content}
+    {:role "user"
+     :parts [{:text (str content)}]}))
 
 (defn- gemini-contents
   [messages]
-  (mapv (fn [{:keys [role content tool_calls tool_call_id thought_signature]}]
-          (cond
-            (= role "tool")
-            {:role "user"
-             :parts [{:functionResponse
-                      {:name (or tool_call_id "tool")
-                       :response (try
-                                   (json/parse-string content true)
-                                   (catch Exception _
-                                     {:result content}))}}]}
-
-            (= role "assistant")
-            (let [parts (cond-> []
-                          (seq content)
-                          (conj {:text content}))
-                  parts (if (seq tool_calls)
-                          (into parts
-                                (map (fn [tc]
-                                       (cond-> {:functionCall
-                                                {:name (get-in tc [:function :name])
-                                                 :id (:id tc)
-                                                 :args (try
-                                                         (json/parse-string (get-in tc [:function :arguments]) true)
-                                                         (catch Exception _ {}))}}
-                                         thought_signature (assoc :thoughtSignature thought_signature)))
-                                     tool_calls))
-                          parts)]
-              {:role "model"
-               :parts parts})
-
-            :else
-            {:role "user"
-             :parts [{:text (str content)}]}))
-        messages))
+  (mapv gemini-message messages))
 
 (defn- gemini-tools
   [tools]
