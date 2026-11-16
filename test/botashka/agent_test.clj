@@ -4,6 +4,7 @@
             [botashka.run :as run]
             [botashka.tools :as tools]
             [botashka.trace :as trace]
+            [botashka.workspace :as ws]
             [clojure.test :refer [deftest is testing]]))
 
 (defn- test-command-executor
@@ -488,3 +489,15 @@
     (is (= "dogfood content" (slurp temp-path)))
     (babashka.fs/delete temp-path)
     (is (= :path-outside-workspace (get-in err-outside [:error :kind])))))
+
+(deftest workspace-resolve-path-boundaries-and-errors
+  (let [valid (ws/resolve-path "." "README.md")
+        outside (ws/resolve-path "." "../outside.txt")
+        not-found (ws/resolve-path "." "missing_file_xyz.txt" {:must-exist? true})
+        empty-required (ws/resolve-path "." "" {:require-path? true})]
+    (is (some? (:workspace valid)))
+    (is (some? (:target valid)))
+    (is (= "README.md" (:rel-path valid)))
+    (is (= :path-outside-workspace (get-in outside [:error :kind])))
+    (is (= :path-not-found (get-in not-found [:error :kind])))
+    (is (= :invalid-arguments (get-in empty-required [:error :kind])))))

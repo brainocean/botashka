@@ -1,6 +1,7 @@
 #!/usr/bin/env bb
 (ns list-files
   (:require [babashka.fs :as fs]
+            [botashka.workspace :as ws]
             [clojure.edn :as edn]))
 
 (def metadata
@@ -13,23 +14,9 @@
              [:map [:files [:vector :string]]]
              [:map [:error [:map [:kind :keyword]]]]]})
 
-(defn- resolve-workspace-path
-  [workspace path]
-  (try
-    (let [workspace (fs/canonicalize workspace)
-          target (fs/canonicalize (fs/path workspace (or path "")))]
-      (if (fs/starts-with? target workspace)
-        {:path target}
-        {:error {:kind :path-outside-workspace
-                 :path path}}))
-    (catch Exception error
-      {:error {:kind :invalid-path
-               :path path
-               :message (.getMessage error)}})))
-
 (defn run
   [{:keys [workspace path]}]
-  (let [{directory :path error :error} (resolve-workspace-path workspace path)]
+  (let [{directory :target error :error} (ws/resolve-path workspace path)]
     (if error
       {:error error}
       (if (fs/directory? directory)

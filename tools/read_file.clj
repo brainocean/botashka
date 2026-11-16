@@ -1,6 +1,7 @@
 #!/usr/bin/env bb
 (ns read-file
   (:require [babashka.fs :as fs]
+            [botashka.workspace :as ws]
             [clojure.edn :as edn]))
 
 (def ^:private max-file-characters 12000)
@@ -15,23 +16,9 @@
              [:map [:content :string]]
              [:map [:error [:map [:kind :keyword]]]]]})
 
-(defn- resolve-workspace-path
-  [workspace path]
-  (try
-    (let [workspace (fs/canonicalize workspace)
-          target (fs/canonicalize (fs/path workspace (or path "")))]
-      (if (fs/starts-with? target workspace)
-        {:path target}
-        {:error {:kind :path-outside-workspace
-                 :path path}}))
-    (catch Exception error
-      {:error {:kind :invalid-path
-               :path path
-               :message (.getMessage error)}})))
-
 (defn run
   [{:keys [workspace path]}]
-  (let [{target-file :path error :error} (resolve-workspace-path workspace path)]
+  (let [{target-file :target error :error} (ws/resolve-path workspace path)]
     (if error
       {:error error}
       (if (fs/regular-file? target-file)

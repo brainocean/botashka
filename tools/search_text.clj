@@ -1,6 +1,7 @@
 #!/usr/bin/env bb
 (ns search-text
   (:require [babashka.fs :as fs]
+            [botashka.workspace :as ws]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]))
@@ -24,23 +25,6 @@
               [:total :int]
               [:truncated :boolean]]
              [:map [:error [:map [:kind :keyword]]]]]})
-
-(defn- resolve-workspace-path
-  [workspace path]
-  (try
-    (let [canonical-ws (fs/canonicalize (or workspace "."))
-          target (if (seq path)
-                   (fs/canonicalize (fs/path canonical-ws path))
-                   canonical-ws)]
-      (if (fs/starts-with? target canonical-ws)
-        {:workspace canonical-ws
-         :target target}
-        {:error {:kind :path-outside-workspace
-                 :path path}}))
-    (catch Exception error
-      {:error {:kind :invalid-path
-               :path path
-               :message (.getMessage error)}})))
 
 (defn- search-file
   [canonical-ws file query]
@@ -78,26 +62,24 @@
     {:error {:kind :invalid-arguments
              :message "Query must be a non-empty string"}}
     (let [{canonical-ws :workspace target-root :target error :error}
-          (resolve-workspace-path workspace path)]
+          (ws/resolve-path workspace path {:must-exist? true})]
       (if error
         {:error error}
-        (if-not (fs/exists? target-root)
-          {:error {:kind :path-not-found :path path}}
-          (let [files (collect-files target-root)
-                all-matches (loop [f-list files
-                                   acc []]
-                              (if-let [f (first f-list)]
-                                (let [matches (search-file canonical-ws f query)
-                                      next-acc (into acc matches)]
-                                  (if (>= (count next-acc) max-matches)
-                                    next-acc
-                                    (recur (rest f-list) next-acc)))
-                                acc))
-                truncated? (>= (count all-matches) max-matches)
-                bounded-matches (vec (take max-matches all-matches))]
-            {:matches bounded-matches
-             :total (count bounded-matches)
-             :truncated truncated?}))))))
+        (let [files (collect-files target-root)
+              all-matches (loop [f-list files
+                                 acc []]
+                            (if-let [f (first f-list)]
+                              (let [matches (search-file canonical-ws f query)
+                                    next-acc (into acc matches)]
+                                (if (>= (count next-acc) max-matches)
+                                  next-acc
+                                  (recur (rest f-list) next-acc)))
+                              acc))
+              truncated? (>= (count all-matches) max-matches)
+              bounded-matches (vec (take max-matches all-matches))]
+          {:matches bounded-matches
+           :total (count bounded-matches)
+           :truncated truncated?})))))
 
 (when-not *compile-files*
   (let [input (try (-> *in* slurp edn/read-string)

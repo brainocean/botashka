@@ -1,8 +1,8 @@
 #!/usr/bin/env bb
 (ns write-file
   (:require [babashka.fs :as fs]
-            [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [botashka.workspace :as ws]
+            [clojure.edn :as edn]))
 
 (def metadata
   {:name "write_file"
@@ -16,28 +16,10 @@
               [:bytes_written :int]]
              [:map [:error [:map [:kind :keyword]]]]]})
 
-(defn- resolve-workspace-path
-  [workspace path]
-  (if (or (nil? path) (str/blank? path))
-    {:error {:kind :invalid-arguments
-             :message "Path must be a non-empty string"}}
-    (try
-      (let [canonical-ws (fs/canonicalize (or workspace "."))
-            target (fs/canonicalize (fs/path canonical-ws path))]
-        (if (fs/starts-with? target canonical-ws)
-          {:workspace canonical-ws
-           :target target}
-          {:error {:kind :path-outside-workspace
-                   :path path}}))
-      (catch Exception error
-        {:error {:kind :invalid-path
-                 :path path
-                 :message (.getMessage error)}}))))
-
 (defn run
   [{:keys [workspace path content]}]
-  (let [{canonical-ws :workspace target :target error :error}
-        (resolve-workspace-path workspace path)]
+  (let [{canonical-ws :workspace target :target rel-path :rel-path error :error}
+        (ws/resolve-path workspace path {:require-path? true})]
     (if error
       {:error error}
       (try
@@ -45,9 +27,8 @@
           (when (and parent (not (fs/exists? parent)))
             (fs/create-dirs parent))
           (spit (str target) (or content ""))
-          (let [rel-path (str (fs/relativize canonical-ws target))]
-            {:path rel-path
-             :bytes_written (count (.getBytes (or content "") "UTF-8"))}))
+          {:path rel-path
+           :bytes_written (count (.getBytes (or content "") "UTF-8"))})
         (catch Exception error
           {:error {:kind :write-failed
                    :path path
