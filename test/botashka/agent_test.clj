@@ -327,9 +327,11 @@
 (deftest code-tool-registry-discovers-malli-parameters-and-lowers-to-json-schema
   (let [reg (tools/code-tool-registry ".")
         read-file (get reg "read_file")
-        list-files (get reg "list_files")]
+        list-files (get reg "list_files")
+        search-text (get reg "search_text")]
     (is (some? read-file))
     (is (some? list-files))
+    (is (some? search-text))
     ;; Parameters are defined as Malli schemas (pure EDN vector)
     (is (vector? (:parameters read-file)))
     (is (= :map (first (:parameters read-file))))
@@ -391,9 +393,11 @@
 (deftest host-validates-tool-return-contract-post-execution
   (let [reg (tools/code-tool-registry ".")
         read-file (get reg "read_file")
-        list-files (get reg "list_files")]
+        list-files (get reg "list_files")
+        search-text (get reg "search_text")]
     (is (some? (:returns read-file)))
     (is (some? (:returns list-files)))
+    (is (some? (:returns search-text)))
     ;; Normal execution conforms to :returns
     (let [res ((:run read-file) {:path "README.md"})]
       (is (string? (:content res))))))
@@ -446,3 +450,13 @@
     (let [tool-res (first (filter #(= (:type %) :tool-result) (:log result)))]
       (is (= :error (get-in tool-res [:data :outcome])))
       (is (= :invalid-tool-output-contract (get-in tool-res [:data :error-kind]))))))
+
+(deftest search-text-tool-finds-matches-and-rejects-outside-workspace
+  (let [reg (tools/code-tool-registry ".")
+        search-text (get reg "search_text")
+        res ((:run search-text) {:query "code-tool-registry"})
+        err-outside ((:run search-text) {:path "../outside" :query "foo"})]
+    (is (pos? (:total res)))
+    (is (vector? (:matches res)))
+    (is (some #(= "src/botashka/tools.clj" (:path %)) (:matches res)))
+    (is (= :path-outside-workspace (get-in err-outside [:error :kind])))))
