@@ -1,5 +1,6 @@
 (ns botashka.agent-test
   (:require [botashka.agent :as agent]
+            [botashka.bus :as bus]
             [botashka.chat :as chat]
             [botashka.command-executor :as command-executor]
             [botashka.model-client :as model-client]
@@ -604,3 +605,62 @@
   (is (= {:kind :run-finished :status :completed :turn 3}
          (chat/event->display-item {:type :run-finished :data {:status :completed :turn 3}})))
   (is (nil? (chat/event->display-item {:type :run-started}))))
+
+(deftest bus-publishes-and-separates-canonical-and-streaming-topics
+  (let [b (bus/new-bus)
+        stream-ch (bus/subscribe! b :stream 10)
+        canonical-ch (bus/subscribe! b :canonical 10)]
+    (bus/publish-stream! b "m-1" :token "hello ")
+    (bus/publish-canonical! b {:type :user-submitted :data {:chars 5}})
+    (bus/publish-stream! b "m-1" :token "world!")
+    (bus/publish-canonical! b {:type :run-finished :data {:status :completed}})
+    (let [s1 (async/<!! stream-ch)
+          s2 (async/<!! stream-ch)
+          c1 (async/<!! canonical-ch)
+          c2 (async/<!! canonical-ch)]
+      (is (= {:topic :stream :stream-id "m-1" :kind :token :payload "hello "} s1))
+      (is (= {:topic :stream :stream-id "m-1" :kind :token :payload "world!"} s2))
+      (is (= :user-submitted (get-in c1 [:payload :type])))
+      (is (= :run-finished (get-in c2 [:payload :type]))))
+    (bus/close-bus! b)))
+
+(deftest agent-run-publishes-to-bus
+  (let [b (bus/new-bus)
+        stream-ch (bus/subscribe! b :stream 10)
+        canonical-ch (bus/subscribe! b :canonical 10)
+        mock-complete! (fn [_]
+                         {:choices [{:finish_reason "stop"
+                                     :message {:role "assistant" :content "Bus pong"}}]})
+        mock-complete-streaming! (fn [_ on-token]
+                                   (on-token "Bus ")
+                                   (on-token "pong")
+                                   {:choices [{:finish_reason "stop"
+                                               :message {:role "assistant" :content "Bus pong"}}]})
+        executor (command-executor/command-executor
+                  {:complete! mock-complete!
+                   :complete-streaming! mock-complete-streaming!
+                   :clock (constantly "2026-10-31T10:00:00Z")
+                   :bus b})
+        res (agent/run! {:command-executor! executor
+                         :prompt "Bus ping"
+                         :bus b
+                         :run-id "run-bus"
+                         :tools {}})]
+    (is (= :completed (:status res)))
+    ;; Check streaming tokens on bus
+    (let [t1 (async/<!! stream-ch)
+          t2 (async/<!! stream-ch)]
+      (is (= "Bus " (:payload t1)))
+      (is (= "pong" (:payload t2))))
+    ;; Check canonical events on bus
+    (let [canonical-events (atom [])]
+      (loop []
+        (let [v (async/poll! canonical-ch)]
+          (when v
+            (swap! canonical-events conj (get-in v [:payload :type]))
+            (recur))))
+      (is (some #{:run-started} @canonical-events))
+      (is (some #{:user-submitted} @canonical-events))
+      (is (some #{:model-responded} @canonical-events))
+      (is (some #{:run-finished} @canonical-events)))
+    (bus/close-bus! b)))

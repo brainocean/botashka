@@ -12,12 +12,11 @@
 
 (defn run!
   "Runs an event-driven agent state machine through an injected command executor.
-
    `action-policy` is a pure function from run state to next command or nil.
    `command-executor!` owns model calls, tools, clocks, and all other imperative dependencies.
    `authorization-policy` optionally authorizes, rejects, or asks approval for selected commands."
   [{:keys [command-executor! action-policy authorization-policy run-id system prompt tools max-turns
-           messages on-event event-chan close-chan?]
+           messages on-event event-chan close-chan? bus]
     :or {max-turns 8}}]
   (let [on-event (or on-event
                      (when event-chan
@@ -27,7 +26,8 @@
                      (command-executor/default-command-executor
                       (cond-> {}
                         authorization-policy (assoc :authorize authorization-policy)
-                        on-event (assoc :on-event on-event))))
+                        on-event (assoc :on-event on-event)
+                        bus (assoc :bus bus))))
         run (run/new-run {:run-id (or run-id (new-run-id))
                           :system system
                           :tools tools

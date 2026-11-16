@@ -1,5 +1,6 @@
 (ns botashka.command-executor
-  (:require [botashka.model-client :as model-client]
+  (:require [botashka.bus :as bus]
+            [botashka.model-client :as model-client]
             [botashka.run :as run]
             [cheshire.core :as json]
             [clojure.core.match :refer [match]])
@@ -46,23 +47,23 @@
    :content (json/generate-string result)})
 
 (defn- append-observed-event
-  "Appends one observed event using the executor-owned clock and notifies on-event if present."
-  ([run clock on-event event]
-   (let [new-run (run/append-event run (clock) (:type event) (:data event) (:evidence event))]
+  "Appends one observed event using the executor-owned clock and notifies bus / on-event if present."
+  ([run clock on-event bus event]
+   (let [new-run (run/append-event run (clock) (:type event) (:data event) (:evidence event))
+         ev (last (:events new-run))]
+     (when bus
+       (bus/publish-canonical! bus ev))
      (when on-event
-       (on-event (last (:events new-run))))
+       (on-event ev))
      new-run))
-  ([run clock on-event type data evidence]
-   (let [new-run (run/append-event run (clock) type data evidence)]
-     (when on-event
-       (on-event (last (:events new-run))))
-     new-run)))
+  ([run clock on-event bus type data evidence]
+   (append-observed-event run clock on-event bus {:type type :data data :evidence evidence})))
 
 (defn- append-observed-events
   "Appends observed event descriptions in order with executor-owned timestamps."
-  [run clock on-event events]
-  (reduce (fn [r {:keys [type data evidence]}]
-            (append-observed-event r clock on-event type data evidence))
+  [run clock on-event bus events]
+  (reduce (fn [r event]
+            (append-observed-event r clock on-event bus event))
           run
           events))
 (defn- normalize-tool-command
@@ -84,7 +85,7 @@
 
 (defn- execute-tool-command
   "Executes one tool command and appends its observed proposal and result events."
-  [run clock on-event command]
+  [run clock on-event bus command]
   (let [tool-call (normalize-tool-command command)
         origin (:origin tool-call)
         raw-arguments (get-in tool-call [:function :arguments])
@@ -93,16 +94,16 @@
                  (catch Exception error
                    {:error error}))
         run (if-let [args (:arguments parsed)]
-              (append-observed-event run clock on-event
+              (append-observed-event run clock on-event bus
                                      (run/tool-proposed-event run tool-call args origin))
-              (append-observed-event run clock on-event
+              (append-observed-event run clock on-event bus
                                      (run/tool-proposed-event run tool-call raw-arguments origin)))
         result (if-let [args (:arguments parsed)]
                  (run-tool tool-call args (:tools run))
                  (tool-error :invalid-arguments tool-call (:error parsed)))
         tool-msg (when (= origin :model)
                    (tool-result-message tool-call result))]
-    (append-observed-event run clock on-event
+    (append-observed-event run clock on-event bus
                            (run/tool-result-event run tool-call result tool-msg origin))))
 
 (defn- authorized? [auth]
@@ -115,39 +116,39 @@
       "Command rejected by authorization policy"))
 
 (defn- handle-rejected-tool
-  [run clock on-event command reason]
+  [run clock on-event bus command reason]
   (let [tool-call (normalize-tool-command command)
         origin (:origin tool-call)
         arguments (try
                     (json/parse-string (get-in tool-call [:function :arguments]) true)
                     (catch Exception _ nil))
-        run (append-observed-event run clock on-event
+        run (append-observed-event run clock on-event bus
                                    (run/tool-proposed-event run tool-call (or arguments "") origin))
         err-result {:error {:kind :action-rejected :reason reason}}
         tool-msg (when (= origin :model)
                    (tool-result-message tool-call err-result))]
-    (append-observed-event run clock on-event
+    (append-observed-event run clock on-event bus
                            (run/tool-result-event run tool-call err-result tool-msg origin))))
 
 (defn command-executor
   "Builds an imperative executor for model, tool, and run commands using structural pattern matching."
-  [{:keys [complete! complete-streaming! clock authorize on-event]
+  [{:keys [complete! complete-streaming! clock authorize on-event bus]
     :or {authorize (constantly :allow)}}]
   (fn [run command]
     (let [auth (authorize run command)]
       (match [(authorized? auth) (:command command)]
         ;; 1. Rejected tool execution
         [false :tool/execute]
-        (handle-rejected-tool run clock on-event command (rejection-reason auth))
+        (handle-rejected-tool run clock on-event bus command (rejection-reason auth))
 
         ;; 2. Other rejected commands -> terminal rejection
         [false _]
-        (append-observed-events run clock on-event
+        (append-observed-events run clock on-event bus
                                 [(run/run-finished-event run :rejected {:reason (rejection-reason auth)})])
 
         ;; 3. Run start
         [true :run/start]
-        (append-observed-events run clock on-event
+        (append-observed-events run clock on-event bus
                                 [(run/run-started-event run)
                                  (run/user-submitted-event (:prompt command))])
 
@@ -155,24 +156,30 @@
         [true :model/complete]
         (let [model-req (or (:request command) (dissoc command :command :origin))
               origin (or (:origin command) :policy)
-              run (append-observed-event run clock on-event (run/model-requested-event run model-req origin))
-              response (if (and complete-streaming! on-event)
-                         (complete-streaming! model-req (fn [token] (on-event {:type :streaming-token :delta token})))
+              run (append-observed-event run clock on-event bus (run/model-requested-event run model-req origin))
+              stream-id (or (:id run) "model-call")
+              on-token (fn [token]
+                         (when bus
+                           (bus/publish-stream! bus stream-id :token token))
+                         (when on-event
+                           (on-event {:type :streaming-token :delta token})))
+              response (if (and complete-streaming! (or bus on-event))
+                         (complete-streaming! model-req on-token)
                          (complete! model-req))]
           (if-let [err (:error response)]
-            (append-observed-event run clock on-event (run/model-failed-event run err origin))
+            (append-observed-event run clock on-event bus (run/model-failed-event run err origin))
             (let [message (assistant-message response)
                   tool-calls (:tool_calls message)]
-              (append-observed-event run clock on-event
+              (append-observed-event run clock on-event bus
                                      (run/model-responded-event run response message tool-calls origin)))))
 
         ;; 5. Tool execution
         [true :tool/execute]
-        (execute-tool-command run clock on-event command)
+        (execute-tool-command run clock on-event bus command)
 
         ;; 6. Run turn limit reached
         [true :run/limit]
-        (append-observed-events run clock on-event
+        (append-observed-events run clock on-event bus
                                 [(run/limit-reached-event run)
                                  (run/run-finished-event run :step-limit nil)])
 
@@ -180,7 +187,7 @@
         [true :run/finish]
         (let [result (or (:result command) (get-in (last (:messages run)) [:content]))
               terminal-status (or (:terminal-status run) :completed)]
-          (append-observed-events run clock on-event
+          (append-observed-events run clock on-event bus
                                   [(run/run-finished-event
                                     run
                                     terminal-status

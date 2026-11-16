@@ -1,11 +1,11 @@
 (ns botashka.chat
   (:require [babashka.fs :as fs]
             [botashka.agent :as agent]
+            [botashka.bus :as bus]
             [botashka.tools :as tools]
             [clojure.core.async :as async]
             [clojure.core.match :refer [match]]
             [clojure.string :as str]))
-
 (def ^:private ansi-reset "\u001b[0m")
 (def ^:private ansi-bold "\u001b[1m")
 (def ^:private ansi-cyan "\u001b[36m")
@@ -97,15 +97,37 @@
     (when-let [v (async/<!! ch)]
       (cons v (channel-seq ch)))))
 
-(defn- consume-events!
-  "Consumes the event channel in the current thread and renders streaming outputs."
-  [event-chan]
-  (let [in-stream? (atom false)]
-    (transduce display-items-xf
-               (completing (fn [_ item]
-                             (render-display-item! in-stream? item)))
-               nil
-               (channel-seq event-chan))))
+(defn- consume-bus!
+  "Consumes the event bus via dual subscriptions for streaming tokens and canonical events.
+   Renders token deltas in real-time and canonical events as structured UI blocks."
+  [b done-promise]
+  (let [stream-ch (bus/subscribe! b :stream (async/sliding-buffer 256))
+        canonical-ch (bus/subscribe! b :canonical 100)
+        in-stream? (atom false)
+        stream-worker (future
+                        (loop []
+                          (when-let [msg (async/<!! stream-ch)]
+                            (when (= (:kind msg) :token)
+                              (reset! in-stream? true)
+                              (print (:payload msg))
+                              (flush))
+                            (recur))))]
+    ;; Consume canonical events on the current thread
+    (loop []
+      (when-let [msg (async/<!! canonical-ch)]
+        (let [evt (:payload msg)]
+          (when-let [item (event->display-item evt)]
+            (render-display-item! in-stream? item))
+          (when (= (:type evt) :run-finished)
+            (deliver done-promise true))))
+      (if (realized? done-promise)
+        (do
+          (bus/unsubscribe! b :stream stream-ch)
+          (bus/unsubscribe! b :canonical canonical-ch)
+          (async/close! stream-ch)
+          (async/close! canonical-ch)
+          @stream-worker)
+        (recur)))))
 
 (defn- default-system [workspace]
   (str "You are Botashka, an expert coding agent. "
@@ -142,7 +164,8 @@
                (println (str ansi-dim "Goodbye!" ansi-reset))
 
                :else
-               (let [event-chan (async/chan 100)
+               (let [b (bus/new-bus)
+                     done-promise (promise)
                      run-future (future
                                   (try
                                     (agent/run! {:prompt trimmed
@@ -150,11 +173,12 @@
                                                  :system system-prompt
                                                  :tools registry
                                                  :max-turns max-turns
-                                                 :event-chan event-chan})
+                                                 :bus b})
                                     (catch Exception error
-                                      (async/close! event-chan)
+                                      (deliver done-promise true)
                                       {:error error})))]
-                 (consume-events! event-chan)
+                 (consume-bus! b done-promise)
+                 (bus/close-bus! b)
                  (let [result @run-future]
                    (if (:error result)
                      (do
