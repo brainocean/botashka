@@ -329,11 +329,13 @@
         read-file (get reg "read_file")
         list-files (get reg "list_files")
         search-text (get reg "search_text")
-        run-command (get reg "run_command")]
+        run-command (get reg "run_command")
+        write-file (get reg "write_file")]
     (is (some? read-file))
     (is (some? list-files))
     (is (some? search-text))
     (is (some? run-command))
+    (is (some? write-file))
     ;; Parameters are defined as Malli schemas (pure EDN vector)
     (is (vector? (:parameters read-file)))
     (is (= :map (first (:parameters read-file))))
@@ -397,11 +399,13 @@
         read-file (get reg "read_file")
         list-files (get reg "list_files")
         search-text (get reg "search_text")
-        run-command (get reg "run_command")]
+        run-command (get reg "run_command")
+        write-file (get reg "write_file")]
     (is (some? (:returns read-file)))
     (is (some? (:returns list-files)))
     (is (some? (:returns search-text)))
     (is (some? (:returns run-command)))
+    (is (some? (:returns write-file)))
     (let [res ((:run read-file) {:path "README.md"})]
       (is (string? (:content res))))))
 (deftest agent-loop-handles-post-check-contract-violation-and-continues
@@ -471,3 +475,16 @@
     (is (zero? (:exit res)))
     (is (clojure.string/includes? (:out res) "dogfood"))
     (is (= :invalid-arguments (get-in err [:error :kind])))))
+
+(deftest write-file-creates-file-and-rejects-outside-workspace
+  (let [reg (tools/code-tool-registry ".")
+        write-fn ((get reg "write_file") :run)
+        temp-path "target/temp_dogfood_test.txt"
+        res (write-fn {:path temp-path :content "dogfood content"})
+        err-outside (write-fn {:path "../outside.txt" :content "evil"})]
+    (is (= temp-path (:path res)))
+    (is (pos? (:bytes_written res)))
+    (is (babashka.fs/exists? temp-path))
+    (is (= "dogfood content" (slurp temp-path)))
+    (babashka.fs/delete temp-path)
+    (is (= :path-outside-workspace (get-in err-outside [:error :kind])))))
