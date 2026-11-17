@@ -71,6 +71,50 @@
       transition: all 0.2s;
     }
     .toc-link:hover { background: #0284c7; color: #fff; border-color: #38bdf8; }
+    /* Law Card Styles */
+    .law-card {
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.8) 100%);
+      border: 1px solid #38bdf8;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 20px rgba(56, 189, 248, 0.12);
+    }
+    .law-header { margin-bottom: 12px; }
+    .law-badge {
+      display: inline-block;
+      background: rgba(56, 189, 248, 0.2);
+      color: #38bdf8;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 12px;
+      margin-bottom: 6px;
+    }
+    .law-header h2 { font-size: 18px; color: #fff; font-weight: 700; }
+    .law-intro { font-size: 13px; color: #cbd5e1; margin-bottom: 16px; }
+    .law-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .law-item {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--surface-border);
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+    }
+    .law-item-title { font-weight: 700; margin-bottom: 8px; font-size: 13px; }
+    .law-win { border-left: 3px solid #22c55e; }
+    .law-win .law-item-title { color: #4ade80; }
+    .law-tradeoff { border-left: 3px solid #eab308; }
+    .law-tradeoff .law-item-title { color: #fde047; }
+    .law-future { border-left: 3px solid #38bdf8; }
+    .law-future .law-item-title { color: #38bdf8; }
+    .law-item ul { padding-left: 18px; color: #94a3b8; }
+    .law-item li { margin-bottom: 4px; }
+    .law-item strong { color: #e2e8f0; }
     .case-section {
       background: var(--surface);
       border: 1px solid var(--surface-border);
@@ -301,6 +345,43 @@
       <div class="meta-item"><strong>工具集:</strong> list_files, read_file, run_command, search_text, write_file</div>
     </div>
   </header>
+
+  <!-- Architectural Law & Performance Summary Card -->
+  <div class="law-card">
+    <div class="law-header">
+      <span class="law-badge">📐 核心架构规律总结</span>
+      <h2>双脑协同效益定理：Tool Call 语义越直接（无复杂动态参数），Fast-path 净收益越大</h2>
+    </div>
+    <div class="law-body">
+      <p class="law-intro">
+        综合 8 大用例成对测试数据，System-1 (Clef 本地快反射) 与 System-2 (LLM 云端慢思考) 的收益平衡点完全取决于 <strong>「工具语义直接度（参数提取难度）」</strong> 与 <strong>「本地判定开销 (~700ms)」</strong> 的对比：
+      </p>
+      <div class="law-grid">
+        <div class="law-item law-win">
+          <div class="law-item-title">🌟 极高收益区：确定性、无/低参数工具 (如 read_file, list_files)</div>
+          <ul>
+            <li><strong>表现 (场景 A)</strong>：单步确定性读取。Clef 在 706ms 内以 97% 置信度预取数据，<strong>直接消灭 2 轮云端 LLM 往返</strong>。</li>
+            <li><strong>ROI</strong>：消耗 706ms 本地算力，节省 ~1.2s 网络与大模型推理延迟，<strong>净提速 38.7%，LLM 成本下降 67%</strong>。</li>
+          </ul>
+        </div>
+        <div class="law-item law-tradeoff">
+          <div class="law-item-title">⚖️ 开销权衡区：动态复合命令 (如复杂 run_command)</div>
+          <ul>
+            <li><strong>表现 (Case 3/4)</strong>：Clef 虽高置信 (91%~95%) 预测出意图，但受限于小模型参数生成能力，<strong>安全门禁强制 Fallback 退避至主模型</strong>。</li>
+            <li><strong>ROI</strong>：每轮判定耗时 ~700-900ms 成为纯前置开销。但带来了 <strong>100% 因果意图审计凭证</strong> 与避免盲目执行的安全性。</li>
+          </ul>
+        </div>
+        <div class="law-item law-future">
+          <div class="law-item-title">🚀 下一步演进：高频命令「工具自沉淀 (Tool Crystallization)」</div>
+          <ul>
+            <li><strong>方向</strong>：将日常高频 shell 命令（如 <code>git status</code>, <code>bb test</code>, <code>git diff HEAD^</code>）沉淀为<strong>无参/少参的独立专有工具</strong>。</li>
+            <li><strong>收益</strong>：将原本落在「开销权衡区」的操作彻底推入「极高收益区」，本地小模型直接击穿秒级执行！</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toc-bar">
 <a class="toc-link" href="#case-a">👉 场景 A: 单步确定性读取</a>
 <a class="toc-link" href="#case-b">👉 场景 B: 混合探索与状态判断</a>
@@ -309,8 +390,7 @@
 <a class="toc-link" href="#case-2">👉 Case 2: 覆盖对比</a>
 <a class="toc-link" href="#case-3">👉 Case 3: 动态执行</a>
 <a class="toc-link" href="#case-4">👉 Case 4: Git 审计</a>
-<a class="toc-link" href="#case-5">👉 Case 5: 结构盘点</a>  </div>
-  <main class="cases-container">
+<a class="toc-link" href="#case-5">👉 Case 5: 结构盘点</a>  <main class="cases-container">
 <section class="case-section" id="case-a">  <div class="case-header">    <div class="case-title-row">      <span class="case-badge badge-highlight">场景 A: 单步确定性读取</span>      <h2 class="case-title">场景 A: 单步确定性读取</h2>    </div>    <div class="prompt-box">      <strong>Prompt:</strong> <code>README 里面写了什么内容？</code>    </div>    <div class="focus-box">      <strong>🔍 关注点与测试设计:</strong> 【核心黄金路径】确定性文件读取。验证 System-1 本地直接击穿：完全绕过 LLM 摸索，零成本预取数据。    </div>  </div>  <!-- KPI Scorecards -->  <div class="kpi-grid">    <div class="kpi-card">      <div class="kpi-title">执行步骤 (Total Steps)</div>      <div class="kpi-compare">        <div class="kpi-val"><span>without -f</span><strong>13 步</strong></div>        <div class="kpi-arrow">➔</div>        <div class="kpi-val"><span>with -f</span><strong class="val-fast">9 步</strong></div>      </div>    </div>    <div class="kpi-card">      <div class="kpi-title">总耗时 (Wall Time)</div>      <div class="kpi-compare">        <div class="kpi-val"><span>without -f</span><strong>3.02s</strong></div>        <div class="kpi-arrow">➔</div>        <div class="kpi-val"><span>with -f</span><strong class="val-fast">1.85s</strong></div>      </div>    </div>    <div class="kpi-card">      <div class="kpi-title">云端 LLM 轮次</div>      <div class="kpi-compare">        <div class="kpi-val"><span>without -f</span><strong>3 次</strong></div>        <div class="kpi-arrow">➔</div>        <div class="kpi-val"><span>with -f</span><strong class="val-fast">1 次</strong></div>      </div>    </div>  </div>  <!-- Side-by-Side Final Answer -->  <div class="answers-side-by-side">    <div class="answer-col">      <div class="answer-col-header badge-baseline">🐢 without -f 最终回答</div>      <div class="note-text">纯 LLM 进行了经典的 3 轮调用：先疑惑列目录，再请求读取 README，最后总结回答，耗时 3.02s，步数 13 步。</div>      <pre class="answer-content">README.md 文件的内容非常简单，仅包含一行文字：
 
 ```markdown
