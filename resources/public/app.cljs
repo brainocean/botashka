@@ -31,33 +31,53 @@
       (js/console.warn "WebSocket is not open:" (.-readyState socket)))
     (js/console.warn "No active WebSocket connection")))
 
+(defn- scroll-to-bottom! []
+  (js/requestAnimationFrame
+   (fn []
+     (let [body (.-body js/document)
+           doc-el (.-documentElement js/document)
+           height (max (.-scrollHeight body) (.-scrollHeight doc-el))]
+       (js/window.scrollTo 0 height)))))
+
 (defn handle-server-event! [event]
   (let [{:keys [type payload]} event]
     (case type
       :session/sync
-      (swap! app-state merge payload {:connected? true})
+      (do
+        (swap! app-state merge payload {:connected? true})
+        (scroll-to-bottom!))
 
       :token/delta
-      (swap! app-state update :streaming-text str (:delta payload))
+      (do
+        (swap! app-state update :streaming-text str (:delta payload))
+        (scroll-to-bottom!))
 
       :timeline/append
-      (swap! app-state update :timeline conj payload)
+      (do
+        (swap! app-state update :timeline conj payload)
+        (scroll-to-bottom!))
 
       :run/settled
-      (swap! app-state assoc
-             :status (:status payload)
-             :streaming-text "")
+      (do
+        (swap! app-state assoc
+               :status (:status payload)
+               :streaming-text "")
+        (scroll-to-bottom!))
 
       :action/approval-required
-      (swap! app-state assoc
-             :status :waiting-approval
-             :pending-approval payload)
+      (do
+        (swap! app-state assoc
+               :status :waiting-approval
+               :pending-approval payload)
+        (scroll-to-bottom!))
 
       :action/approval-settled
-      (swap! app-state (fn [s]
-                         (if (= (get-in s [:pending-approval :id]) (:approval-id payload))
-                           (assoc s :pending-approval nil :status :running)
-                           s)))
+      (do
+        (swap! app-state (fn [s]
+                           (if (= (get-in s [:pending-approval :id]) (:approval-id payload))
+                             (assoc s :pending-approval nil :status :running)
+                             s)))
+        (scroll-to-bottom!))
 
       (js/console.log "Unhandled event:" (pr-str event)))))
 
@@ -195,6 +215,7 @@
                          (when (and (not (empty? (.trim input-text))) (not disabled?))
                            (let [text (.trim input-text)]
                              (swap! app-state assoc :input-text "" :status :running)
+                             (scroll-to-bottom!)
                              (send-event! {:type :prompt/submit
                                            :payload {:text text}}))))}
      [:fieldset {:role "group"}
