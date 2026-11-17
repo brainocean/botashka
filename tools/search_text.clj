@@ -7,7 +7,7 @@
             [clojure.string :as str]))
 
 (def ^:private max-matches 50)
-(def ^:private ignore-dirs #{".git" ".omp" ".cpcache" ".clj-kondo" "target" "node_modules"})
+(def ^:private ignore-dirs #{".git" ".omp" ".cpcache" ".clj-kondo" "target" "node_modules" "models"})
 
 (def metadata
   {:name "search_text"
