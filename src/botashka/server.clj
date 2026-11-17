@@ -150,6 +150,7 @@
                 (case (:type evt)
                   :decision-responded
                   (let [dec-item {:id (str (java.util.UUID/randomUUID))
+                                  :role :decision
                                   :choice (get-in evt [:data :choice])
                                   :decider (get-in evt [:data :decider])
                                   :confidence (get-in evt [:data :confidence])
