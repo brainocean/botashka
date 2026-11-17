@@ -38,11 +38,21 @@
      (when-let [el (js/document.getElementById "content-area")]
        (set! (.-scrollTop el) (.-scrollHeight el))))))
 (defn- focus-input! []
-  (js/setTimeout
-   (fn []
-     (when-let [el (js/document.getElementById "prompt-input")]
-       (.focus el)))
-   50))
+  (let [try-focus (fn f [attempts]
+                    (if-let [el (js/document.getElementById "prompt-input")]
+                      (if (.-disabled el)
+                        (when (> attempts 0)
+                          (js/setTimeout #(f (dec attempts)) 50))
+                        (do
+                          (.focus el)
+                          (when (.-setSelectionRange el)
+                            (let [len (.-length (.-value el))]
+                              (.setSelectionRange el len len)))))
+                      (when (> attempts 0)
+                        (js/setTimeout #(f (dec attempts)) 50))))]
+    (js/requestAnimationFrame
+     (fn []
+       (try-focus 15)))))
 (defn handle-server-event! [event]
   (let [{:keys [type payload]} event]
     (case type
