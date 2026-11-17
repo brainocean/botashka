@@ -1,12 +1,39 @@
 (ns botashka.run
   (:require [clojure.core.match :refer [match]]))
+(defn- decision-handoff-message
+  "Generates a contextual handoff message when a fast-path decision model yielded
+   to primary LLM due to low confidence or no tool needed, providing factual context to System 2."
+  [run]
+  (let [last-event (last (:events run))
+        last-decision (:last-decision run)]
+    (when (and (= (:type last-event) :decision-responded)
+               last-decision)
+      (let [{:keys [choice confidence probability decider]} last-decision
+            conf (or confidence probability)
+            conf-str (when conf (str " (confidence: " (int (* 100 conf)) "%)"))]
+        (cond
+          (= choice "no_tool")
+          {:role "user"
+           :content (str "[System Context: Fast-path decider `" (or decider "clef")
+                         "` determined no immediate tool is needed" conf-str
+                         ". Proceeding with full reasoning.]")}
+
+          (seq choice)
+          {:role "user"
+           :content (str "[System Context: Fast-path decider `" (or decider "clef")
+                         "` considered `" choice "`" conf-str
+                         ", but confidence was below threshold. Handing over to primary model for strategic reasoning.]")})))))
 
 (defn build-model-context
-  "Purely projects the model invocation parameters (context projection) from current run state."
+  "Purely projects the model invocation parameters (context projection) from current run state,
+   including any active fast-path handoff context for System 2."
   [run]
-  {:system (:system run)
-   :messages (:messages run)
-   :tools (mapv :schema (vals (:tools run)))})
+  (let [handoff (decision-handoff-message run)
+        messages (cond-> (:messages run)
+                   handoff (conj handoff))]
+    {:system (:system run)
+     :messages messages
+     :tools (mapv :schema (vals (:tools run)))}))
 
 (defn new-run
   "Creates an unstarted immutable agent run from explicit options."

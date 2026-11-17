@@ -45,15 +45,22 @@
   {:role "tool"
    :tool_call_id (:id tool-call)
    :content (json/generate-string result)})
-
 (defn- host-observation-message
-  "Builds a host observation message when a tool was executed by a decision/host policy,
+  "Builds a host observation message when a tool was executed by a fast-path decision/host policy,
    allowing the model to immediately consume the result without duplicate tool execution."
   [tool-call result]
-  {:role "user"
-   :content (str "[System Observation: Tool `" (tool-name tool-call) "` was executed with result:\n"
-                 (json/generate-string result)
-                 "\nPlease use this information to answer the user request directly without repeating this tool call.]")})
+  (let [tname (tool-name tool-call)
+        origin (:origin tool-call)
+        decider (:decider tool-call)
+        conf (or (:confidence tool-call) (:probability tool-call))
+        conf-str (when conf (str " (" (int (* 100 conf)) "% confidence)"))
+        source-str (if (= origin :decision)
+                     (str "Fast-path decider `" (or decider "clef") "`" conf-str)
+                     "Host policy")]
+    {:role "user"
+     :content (str "[Observation: Tool `" tname "` was pre-executed by " source-str " with result:\n"
+                   (json/generate-string result)
+                   "\nPlease use this observed result directly to answer or continue without repeating `" tname "`.]")}))
 
 (defn- append-observed-event
   "Appends one observed event using the executor-owned clock and notifies bus / on-event if present."

@@ -722,3 +722,40 @@
         cmd (combined-policy run)]
     (is (= :decision/complete (:command cmd)))
     (is (some #{"list_files"} (:criteria cmd)))))
+
+(deftest model-context-projects-fast-path-handoff-message
+  (testing "Yielding on low-confidence decision injects handoff context to System 2"
+    (let [run (-> (run/new-run {:run-id "r-handoff" :max-turns 5})
+                  (assoc :status :awaiting-model
+                         :messages [{:role "user" :content "What is the latest file?"}])
+                  (run/append-event "2026-11-17T03:00:00Z"
+                                    :decision-requested
+                                    {:turn 0 :decider "clef-flash" :criteria ["read_file" "no_tool"]}
+                                    {:state "summary"})
+                  (run/append-event "2026-11-17T03:00:01Z"
+                                    :decision-responded
+                                    {:turn 0 :decider "clef-flash" :choice "read_file" :probability 0.55 :confidence 0.52}
+                                    {:decision {:choice "read_file"}}))
+          ctx (run/build-model-context run)
+          last-msg (last (:messages ctx))]
+      (is (= 2 (count (:messages ctx))))
+      (is (= "user" (:role last-msg)))
+      (is (.contains (:content last-msg) "considered `read_file` (confidence: 52%)"))
+      (is (.contains (:content last-msg) "Handing over to primary model"))))
+
+  (testing "Decision no_tool injects no-tool context to System 2"
+    (let [run (-> (run/new-run {:run-id "r-no-tool" :max-turns 5})
+                  (assoc :status :awaiting-model
+                         :messages [{:role "user" :content "Hello, how are you?"}])
+                  (run/append-event "2026-11-17T03:00:00Z"
+                                    :decision-requested
+                                    {:turn 0 :decider "clef-flash" :criteria ["list_files" "no_tool"]}
+                                    {:state "summary"})
+                  (run/append-event "2026-11-17T03:00:01Z"
+                                    :decision-responded
+                                    {:turn 0 :decider "clef-flash" :choice "no_tool" :probability 0.94 :confidence 0.90}
+                                    {:decision {:choice "no_tool"}}))
+          ctx (run/build-model-context run)
+          last-msg (last (:messages ctx))]
+      (is (= 2 (count (:messages ctx))))
+      (is (.contains (:content last-msg) "determined no immediate tool is needed (confidence: 90%)")))))
