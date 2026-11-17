@@ -143,11 +143,25 @@
             (when-let [msg (async/<!! canonical-ch)]
               (let [evt (:payload msg)]
                 (case (:type evt)
+                  :decision-responded
+                  (let [dec-item {:id (str (java.util.UUID/randomUUID))
+                                  :role :decision
+                                  :choice (get-in evt [:data :choice])
+                                  :decider (get-in evt [:data :decider])
+                                  :confidence (get-in evt [:data :confidence])
+                                  :probability (get-in evt [:data :probability])}]
+                    (swap! session-state update :timeline conj dec-item)
+                    (broadcast! {:type :timeline/append
+                                 :payload dec-item}))
+
                   :tool-proposed
-                  (let [tool-item {:id (str (java.util.UUID/randomUUID))
+                  (let [origin (get-in evt [:data :origin])
+                        tool-item {:id (str (java.util.UUID/randomUUID))
                                    :role :tool-proposed
                                    :tool (get-in evt [:data :tool])
-                                   :args (get-in evt [:evidence :arguments])}]
+                                   :origin origin
+                                   :args (or (get-in evt [:evidence :arguments])
+                                             (get-in evt [:evidence :raw-arguments]))}]
                     ;; 将之前的思考打字内容落地，并追加工具提议
                     (let [streaming (:streaming-text @session-state)]
                       (when-not (empty? streaming)

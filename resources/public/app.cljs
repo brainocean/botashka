@@ -185,14 +185,24 @@
       [:header {:style {:display "flex" :justify-content "space-between"}}
        [:strong "🤖 Botashka"]]
       [:div {:style {:white-space "pre-wrap"}} (:text item)]]
+     :decision
+     [:div {:style {:padding "0.2rem 0"}}
+      [:span {:class "badge" :style {:background-color "#6a1b9a" :color "#fff" :margin-right "0.5rem"}}
+       "⚡ FAST PATH"]
+      [:strong {:style {:color "#ba68c8"}} (str "Decider: " (:choice item))]
+      (when-let [conf (:confidence item)]
+        [:small {:style {:margin-left "0.5rem" :color "var(--pico-muted-color)"}}
+         (str "(" (int (* 100 conf)) "% confidence)")])]
 
      :tool-proposed
      [:details {:open false}
       [:summary {:style {:cursor "pointer"}}
-       [:strong (str "● Tool Proposed: " (:tool item))]]
+       [:strong (str "● Tool Proposed: " (:tool item))]
+       (when (= (:origin item) :decision)
+         [:span {:class "badge" :style {:background-color "#6a1b9a" :color "#fff" :margin-left "0.5rem" :font-size "0.7rem"}}
+          "Fast Path"])]
       [:pre {:style {:margin-top "0.5rem"}}
        [:code (str "Arguments: " (format-tool-args (:args item)))]]]
-
      :tool
      (let [err? (:error? item)]
        [:details {:open (boolean err?)}
