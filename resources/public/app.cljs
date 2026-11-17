@@ -37,7 +37,12 @@
    (fn []
      (when-let [el (js/document.getElementById "content-area")]
        (set! (.-scrollTop el) (.-scrollHeight el))))))
-
+(defn- focus-input! []
+  (js/setTimeout
+   (fn []
+     (when-let [el (js/document.getElementById "prompt-input")]
+       (.focus el)))
+   50))
 (defn handle-server-event! [event]
   (let [{:keys [type payload]} event]
     (case type
@@ -61,7 +66,8 @@
         (swap! app-state assoc
                :status (:status payload)
                :streaming-text "")
-        (scroll-to-bottom!))
+        (scroll-to-bottom!)
+        (focus-input!))
 
       :action/approval-required
       (do
@@ -247,7 +253,8 @@
                               (send-event! {:type :prompt/submit
                                             :payload {:text text}}))))}
       [:fieldset {:role "group"}
-       [:input {:type "text"
+       [:input {:id "prompt-input"
+                :type "text"
                 :placeholder (if disabled? "Botashka 正在处理任务..." "输入 Prompt / 需求...")
                 :disabled disabled?
                 :value input-text
