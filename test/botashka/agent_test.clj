@@ -759,3 +759,29 @@
           last-msg (last (:messages ctx))]
       (is (= 2 (count (:messages ctx))))
       (is (.contains (:content last-msg) "determined no immediate tool is needed (confidence: 90%)")))))
+
+(deftest clef-policy-rejects-read-file-when-target-cannot-be-extracted
+  (testing "Even if Clef predicts read_file with high confidence, missing target falls back to LLM"
+    (let [mock-decide (fn [_] {:choice "read_file" :probability 0.88 :confidence 0.82 :model "clef-flash"})
+          policy (clef-policy/clef-action-policy {:decide-fn mock-decide :min-probability 0.70})
+          ;; User prompt does NOT mention any file or readme
+          run-init (-> (run/new-run {:run-id "r-nofile" :max-turns 5})
+                       (assoc :status :awaiting-model
+                              :tools {"read_file" {:schema {}}})
+                       (run/append-event "2026-11-17T03:00:00Z"
+                                         :user-submitted
+                                         {:characters 20}
+                                         {:prompt "root文件夹哪个文件最新？"}))
+          cmd-decide (policy run-init)
+          run-after-decision (-> run-init
+                                 (run/append-event "2026-11-17T03:00:01Z"
+                                                   :decision-requested
+                                                   {:turn 0 :decider "clef-flash" :criteria (:criteria cmd-decide)}
+                                                   {:state ""})
+                                 (run/append-event "2026-11-17T03:00:02Z"
+                                                   :decision-responded
+                                                   (mock-decide nil)
+                                                   {:decision (mock-decide nil)}))
+          cmd-tool (policy run-after-decision)]
+      ;; Because path cannot be inferred from "root文件夹哪个文件最新？", policy MUST return nil
+      (is (nil? cmd-tool)))))
