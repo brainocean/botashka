@@ -27,6 +27,19 @@
            (str "Latest message from " (:role last-msg) ": "
                 (pr-str (subs (or (:content last-msg) "") 0 (min 150 (count (or (:content last-msg) ""))))))))))
 
+(defn default-clef-arguments-extractor
+  "Infers sensible default arguments for known tools when selected by Clef."
+  [run choice]
+  (let [user-prompt (or (->> (:messages run)
+                             (filter #(= (:role %) "user"))
+                             last
+                             :content)
+                        "")]
+    (case choice
+      "list_files" {:path "."}
+      "search_text" {:query user-prompt}
+      {})))
+
 (defn clef-action-policy
   "Creates an ActionPolicy powered by a Clef decision model.
    When the run status is :awaiting-model and not at max-turns:
@@ -34,11 +47,17 @@
      2. If Clef selects a tool with probability >= min-probability and choice != 'no_tool':
         Returns an action proposal or direct command {:command :tool/execute, :origin :clef, :tool choice}.
      3. If Clef chooses 'no_tool' or confidence is below threshold, returns nil
-        (allowing fallback to default-action-policy or subsequent policies)."
+        (allowing fallback to default-action-policy or subsequent policies).
+   
+   Options:
+     `:decide-fn` - function (options) -> {:choice ... :probability ... :confidence ...} (defaults to clef-client/decide!)
+     `:arguments-fn` - function (run, choice) -> arguments map (defaults to default-clef-arguments-extractor)
+     `:min-probability` - minimum probability required to accept Clef's choice (default 0.75)
+     `:candidate-tools` - override vector of candidate tool names (defaults to registered tool names)"
   ([] (clef-action-policy {}))
   ([{:keys [decide-fn arguments-fn min-probability candidate-tools]
      :or {decide-fn clef-client/decide!
-          arguments-fn (constantly {})
+          arguments-fn default-clef-arguments-extractor
           min-probability 0.75}}]
    (fn [run]
      (let [last-event (last (:events run))]

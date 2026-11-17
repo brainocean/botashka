@@ -23,17 +23,28 @@
            (chat/chat-loop opts))}
 
   run
-  {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [<prompt>]"
+  {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [--clef] [<prompt>]"
    :override-builtin true
-   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :g :graph :t :trace}
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :g :graph :t :trace :c :clef}
                                                          :args->opts [:prompt]
-                                                         :coerce {:graph :boolean :trace :boolean}})
+                                                         :coerce {:graph :boolean :trace :boolean :clef :boolean}})
                workspace (or (:workspace opts) ".")
                graph? (boolean (or (:graph opts) (:trace opts)))
+               clef? (boolean (:clef opts))
                prompt (or (:prompt opts)
                           "What is the title of the project? Read README.md using available tools.")
                registry (tools/code-tool-registry workspace)
-               result (agent/run! {:prompt prompt :tools registry})]
+               policy (if clef?
+                        (do
+                          (require 'botashka.clef-policy)
+                          (require 'botashka.run)
+                          ((resolve 'botashka.run/first-applicable-action-policy)
+                           ((resolve 'botashka.clef-policy/clef-action-policy) {:min-probability 0.70})
+                           (resolve 'botashka.run/default-action-policy)))
+                        nil)
+               run-opts (cond-> {:prompt prompt :tools registry}
+                          policy (assoc :action-policy policy))
+               result (agent/run! run-opts)]
            (when graph?
              (trace/render-trace-graph result))
            (println "\n=== Terminal Status ===")
