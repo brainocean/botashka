@@ -32,11 +32,18 @@
                          decider (str " (" decider (when conf (str " " (int (* 100 conf)) "%")) ")"))]
         [(str line-prefix " Action:  :tool/execute [origin: " origin-str "] -> "
               (:tool data) " " (pr-str (:arguments evid)))])
-      :tool-result
-      [(str line-prefix " Result:  outcome: " (:outcome data)
-            (when (:error-kind data) (str ", error: " (:error-kind data)))
-            " [origin: " (or (:origin data) :model) "]")]
 
+      :tool-result
+      (let [res (get-in evid [:result])
+            res-str (pr-str res)
+            truncated (if (> (count res-str) 70)
+                        (str (subs res-str 0 67) "...")
+                        res-str)]
+        (cond-> [(str line-prefix " Result:  outcome: " (:outcome data)
+                      (when (:error-kind data) (str ", error: " (:error-kind data)))
+                      " [origin: " (or (:origin data) :model) "]")]
+          (and res (not= res-str "nil"))
+          (conj (str line-prefix " Payload: " truncated))))
       :model-failed
       [(str line-prefix " Error:   " (:error-kind data) " (status: " (:status data) ")")]
 
