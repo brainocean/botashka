@@ -209,12 +209,12 @@
        (try
          (let [prev-messages (:messages @session-state)
                fast-path? (:fast-path? @session-state)
-               action-policy (when fast-path?
-                               (require 'botashka.clef-policy)
-                               (require 'botashka.run)
-                               ((resolve 'botashka.run/first-applicable-action-policy)
-                                ((resolve 'botashka.clef-policy/clef-action-policy) {:min-probability 0.70})
-                                (resolve 'botashka.run/default-action-policy)))
+              action-policy (when fast-path?
+                              (require 'botashka.clef-policy)
+                              (require 'botashka.run)
+                              ((resolve 'botashka.run/first-applicable-action-policy)
+                               ((resolve 'botashka.clef-policy/clef-action-policy) {:min-probability 0.80})
+                               (resolve 'botashka.run/default-action-policy)))
                executor (command-executor/default-command-executor
                          {:authorize web-authorization-policy
                           :bus b})

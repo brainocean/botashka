@@ -45,6 +45,7 @@
   [run choice]
   (let [user-prompt (initial-user-prompt run)]
     (case choice
+      "list_files"  {:path "."}
       "search_text" {:query (if (str/blank? user-prompt) "" user-prompt)}
       "read_file" (when-let [detected (or (re-find #"(?i)readme(\.md)?" user-prompt)
                                           (re-find #"[a-zA-Z0-9_\-\./]+\.[a-zA-Z0-9]+" user-prompt))]
