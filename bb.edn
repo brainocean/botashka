@@ -27,15 +27,15 @@
            (chat/chat-loop opts))}
 
   web
-  {:doc "Starts the Web UI console: bb web [-w <dir>] [-p <port>]"
-   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :p :port}
-                                                         :coerce {:port :long :workspace :string}})]
+  {:doc "Starts the Web UI console: bb web [-w <dir>] [-p <port>] [-f|--fast-path]"
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :p :port :f :fast-path}
+                                                         :coerce {:port :long :workspace :string :fast-path :boolean}})]
            (server/-main opts))}
 
   web-spike
   {:doc "Alias for bb web"
-   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :p :port}
-                                                         :coerce {:port :long :workspace :string}})]
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :p :port :f :fast-path}
+                                                         :coerce {:port :long :workspace :string :fast-path :boolean}})]
            (server/-main opts))}
 
   run

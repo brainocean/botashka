@@ -14,6 +14,7 @@
            :streaming-text ""       ;; 正在打字输出的临时文本
            :pending-approval nil    ;; {:id ... :tool ... :args ...}
            :workspace "."
+           :fast-path? false        ;; 是否开启 fast-path
            :input-text ""}))
 
 ;; =============================================================================
@@ -34,10 +35,8 @@
 (defn- scroll-to-bottom! []
   (js/requestAnimationFrame
    (fn []
-     (let [body (.-body js/document)
-           doc-el (.-documentElement js/document)
-           height (max (.-scrollHeight body) (.-scrollHeight doc-el))]
-       (js/window.scrollTo 0 height)))))
+     (when-let [el (js/document.getElementById "content-area")]
+       (set! (.-scrollTop el) (.-scrollHeight el))))))
 
 (defn handle-server-event! [event]
   (let [{:keys [type payload]} event]
@@ -79,6 +78,9 @@
                              s)))
         (scroll-to-bottom!))
 
+      :config/fast-path-updated
+      (swap! app-state assoc :fast-path? (:fast-path? payload))
+
       (js/console.log "Unhandled event:" (pr-str event)))))
 
 (defn connect-ws! []
@@ -115,15 +117,29 @@
 (defn header-view []
   (let [connected? (:connected? @app-state)
         status (:status @app-state)
-        ws (:workspace @app-state)]
-    [:header {:style {:display "flex" :justify-content "space-between" :align-items "center" :padding "0.6rem 0"}}
+        ws (:workspace @app-state)
+        fast-path? (:fast-path? @app-state)]
+    [:header {:class "app-header"}
      [:hgroup {:style {:margin 0}}
       [:h3 {:style {:margin 0}} "Botashka"]
       [:small {:style {:margin 0 :color "var(--pico-muted-color)"}} (str "Workspace: " ws)]]
-     [:div
+     [:div {:class "header-controls"}
+      ;; Fast Path Toggle Switch
+      [:label {:class "toggle-label" :title "打开/关闭 Clef Fast-Path 双系统决策加速"}
+       [:input {:type "checkbox"
+                :role "switch"
+                :checked fast-path?
+                :on-change (fn [e]
+                             (let [checked? (.. e -target -checked)]
+                               (swap! app-state assoc :fast-path? checked?)
+                               (send-event! {:type :config/fast-path
+                                             :payload {:enabled? checked?}})))}]
+       [:span {:style {:font-weight (if fast-path? "600" "normal")}}
+        (if fast-path? "⚡ Fast Path ON" "Fast Path")]]
+      ;; 连接状态指示
       [:span {:class (str "badge " (if connected? "badge-online" "badge-offline"))}
        (if connected? "🟢 CONNECTED" "🔴 DISCONNECTED")]
-      [:span {:style {:margin-left "0.5rem" :color "var(--pico-muted-color)" :font-size "0.8rem"}}
+      [:span {:style {:color "var(--pico-muted-color)" :font-size "0.8rem"}}
        (str "State: " (name status))]]]))
 
 (defn format-tool-args [args]
@@ -134,7 +150,7 @@
 
 (defn approval-modal-view []
   (when-let [approval (:pending-approval @app-state)]
-    [:article {:class "tool-box" :style {:border-color "var(--pico-primary)"}}
+    [:article {:class "tool-box"}
      [:header
       [:strong "⚠️ 权限请求：允许执行以下敏感工具调用吗？"]]
      [:div
@@ -193,9 +209,9 @@
       [:header [:strong {:style {:color "var(--pico-del-color)"}} "⚠️ System"]]
       [:p {:style {:margin 0 :color "var(--pico-del-color)"}} (:text item)]])])
 
-(defn timeline-view []
+(defn content-view []
   (let [{:keys [timeline streaming-text]} @app-state]
-    [:section
+    [:main {:id "content-area" :class "app-content"}
      (for [item timeline]
        ^{:key (:id item)} [timeline-item-view item])
      ;; 流式打字机卡片
@@ -204,36 +220,36 @@
         [:header [:strong "🤖 Botashka (Thinking / Responding...)"]]
         [:div {:style {:white-space "pre-wrap"}}
          streaming-text
-         [:span {:class "streaming-cursor"}]]])]))
+         [:span {:class "streaming-cursor"}]]])
+     [approval-modal-view]]))
 
-(defn input-box-view []
+(defn footer-view []
   (let [status (:status @app-state)
         input-text (:input-text @app-state)
         disabled? (or (= status :running) (= status :waiting-approval))]
-    [:form {:on-submit (fn [e]
-                         (.preventDefault e)
-                         (when (and (not (empty? (.trim input-text))) (not disabled?))
-                           (let [text (.trim input-text)]
-                             (swap! app-state assoc :input-text "" :status :running)
-                             (scroll-to-bottom!)
-                             (send-event! {:type :prompt/submit
-                                           :payload {:text text}}))))}
-     [:fieldset {:role "group"}
-      [:input {:type "text"
-               :placeholder (if disabled? "Botashka 正在处理任务..." "输入 Prompt / 需求...")
-               :disabled disabled?
-               :value input-text
-               :on-change (fn [e]
-                            (swap! app-state assoc :input-text (.. e -target -value)))}]
-      [:button {:type "submit" :disabled disabled?} "发送"]]]))
+    [:footer {:class "app-footer"}
+     [:form {:on-submit (fn [e]
+                          (.preventDefault e)
+                          (when (and (not (empty? (.trim input-text))) (not disabled?))
+                            (let [text (.trim input-text)]
+                              (swap! app-state assoc :input-text "" :status :running)
+                              (scroll-to-bottom!)
+                              (send-event! {:type :prompt/submit
+                                            :payload {:text text}}))))}
+      [:fieldset {:role "group"}
+       [:input {:type "text"
+                :placeholder (if disabled? "Botashka 正在处理任务..." "输入 Prompt / 需求...")
+                :disabled disabled?
+                :value input-text
+                :on-change (fn [e]
+                             (swap! app-state assoc :input-text (.. e -target -value)))}]
+       [:button {:type "submit" :disabled disabled?} "发送"]]]]))
 
-(defn main-view []
-  [:main
+(defn main-layout []
+  [:div {:style {:display "flex" :flex-direction "column" :height "100%"}}
    [header-view]
-   [:hr]
-   [timeline-view]
-   [approval-modal-view]
-   [input-box-view]])
+   [content-view]
+   [footer-view]])
 
 ;; =============================================================================
 ;; 4. 挂载入口
@@ -241,6 +257,6 @@
 
 (defn init! []
   (connect-ws!)
-  (rdom/render [main-view] (js/document.getElementById "app")))
+  (rdom/render [main-layout] (js/document.getElementById "app")))
 
 (init!)

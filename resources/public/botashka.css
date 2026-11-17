@@ -13,8 +13,56 @@
   --pico-form-element-spacing-horizontal: 0.75rem;
 }
 
-body {
-  padding-bottom: 5rem;
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* 由内部 content 区域独立滚动 */
+}
+
+/* App 视口主容器: 顶层 Flexbox 垂直切分 */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+/* 固定 Header */
+.app-header {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  background-color: var(--pico-background-color);
+  z-index: 10;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* Fast-Path 开关控件 */
+.toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--pico-color);
+  user-select: none;
+}
+
+.toggle-label input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
 }
 
 /* 顶部状态徽标 */
@@ -35,6 +83,27 @@ body {
 .badge-offline {
   background-color: #c62828;
   color: #fff;
+}
+
+/* 中间 Content 区域: 独立滚动 */
+.app-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 1rem 0;
+  scroll-behavior: smooth;
+}
+
+/* 底部固定 Footer */
+.app-footer {
+  flex: 0 0 auto;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--pico-muted-border-color);
+  background-color: var(--pico-background-color);
+  z-index: 10;
+}
+
+.app-footer form {
+  margin: 0;
 }
 
 /* Timeline 消息卡片 */
@@ -59,7 +128,7 @@ body {
 /* 人在回路审批弹窗卡片 */
 .tool-box {
   background-color: var(--pico-card-background-color);
-  border: 1px dashed var(--pico-muted-border-color);
+  border: 1px dashed var(--pico-primary);
   padding: 0.85rem 1rem;
   border-radius: 4px;
   margin-top: 0.5rem;
@@ -89,9 +158,7 @@ body {
 }
 
 /* =============================================================================
-   底部输入栏与按钮组修复
-   1. 解决 Pico group 中 button 换行导致的上下不对齐问题
-   2. 解决 input 与 button 高度不一致以及外框错位问题
+   输入栏与按钮组尺寸约束
    ============================================================================= */
 [role="group"] {
   display: flex !important;

@@ -25,8 +25,8 @@
          :pending-approval nil     ;; 待审批项 {:id ... :tool ... :args ...}
          :messages []              ;; 维护底层 Agent 的多轮对话历史
          :turn-count 1             ;; 当前轮次
-         :workspace "."}))
-
+         :workspace "."
+         :fast-path? false}))
 (defonce pending-approvals (atom {})) ;; approval-id -> promise
 
 (defn- broadcast! [event]
@@ -189,19 +189,26 @@
        ;; 4. 真正执行 Agent Run!
        (try
          (let [prev-messages (:messages @session-state)
+               fast-path? (:fast-path? @session-state)
+               action-policy (when fast-path?
+                               (require 'botashka.clef-policy)
+                               (require 'botashka.run)
+                               ((resolve 'botashka.run/first-applicable-action-policy)
+                                ((resolve 'botashka.clef-policy/clef-action-policy) {:min-probability 0.70})
+                                (resolve 'botashka.run/default-action-policy)))
                executor (command-executor/default-command-executor
                          {:authorize web-authorization-policy
                           :bus b})
-               result (agent/run! {:prompt user-prompt
-                                   :messages prev-messages
-                                   :system system-prompt
-                                   :tools registry
-                                   :max-turns 10
-                                   :authorization-policy web-authorization-policy
-                                   :command-executor! executor
-                                   :bus b})]
-           ;; 等待事件消费完毕
-           (deref done-promise 5000 false)
+               run-opts (cond-> {:prompt user-prompt
+                                 :messages prev-messages
+                                 :system system-prompt
+                                 :tools registry
+                                 :max-turns 10
+                                 :authorization-policy web-authorization-policy
+                                 :command-executor! executor
+                                 :bus b}
+                          action-policy (assoc :action-policy action-policy))
+               result (agent/run! run-opts)]
            ;; 收尾最后的思考文字
            (let [streaming (:streaming-text @session-state)]
              (when-not (empty? streaming)
@@ -257,13 +264,18 @@
         :prompt/submit
         (run-agent-turn! (:text payload))
 
+        :config/fast-path
+        (let [enabled? (boolean (:enabled? payload))]
+          (swap! session-state assoc :fast-path? enabled?)
+          (broadcast! {:type :config/fast-path-updated
+                       :payload {:fast-path? enabled?}}))
+
         :action/decision
         (handle-approval-decision! (:approval-id payload) (:approved? payload))
 
         (println "Unknown event from client:" event)))
     (catch Exception e
       (println "Failed to parse client message:" raw-str e))))
-
 (defn- ws-handler [req]
   (httpkit/as-channel req
    {:on-open (fn [ch]
@@ -335,11 +347,11 @@
                     (Integer/parseInt p))
                   7890)
          host (or (:host opts) "127.0.0.1")
-         workspace (or (:workspace opts) ".")]
-     (swap! session-state assoc :workspace workspace)
-     (println (str "Starting Botashka Web Console at http://" host ":" port " (workspace: " workspace ") ..."))
+         workspace (or (:workspace opts) ".")
+         fast-path? (boolean (or (:fast-path opts) (:clef opts)))]
+     (swap! session-state assoc :workspace workspace :fast-path? fast-path?)
+     (println (str "Starting Botashka Web Console at http://" host ":" port " (workspace: " workspace ", fast-path: " fast-path? ") ..."))
      (httpkit/run-server app-handler {:ip host :port port}))))
-
 (defn -main [& args]
   (let [opts (if (and (seq args) (map? (first args)))
                (first args)
