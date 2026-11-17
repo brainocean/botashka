@@ -46,6 +46,15 @@
    :tool_call_id (:id tool-call)
    :content (json/generate-string result)})
 
+(defn- host-observation-message
+  "Builds a host observation message when a tool was executed by a decision/host policy,
+   allowing the model to immediately consume the result without duplicate tool execution."
+  [tool-call result]
+  {:role "user"
+   :content (str "[System Observation: Tool `" (tool-name tool-call) "` was executed with result:\n"
+                 (json/generate-string result)
+                 "\nPlease use this information to answer the user request directly without repeating this tool call.]")})
+
 (defn- append-observed-event
   "Appends one observed event using the executor-owned clock and notifies bus / on-event if present."
   ([run clock on-event bus event]
@@ -106,8 +115,9 @@
         result (if-let [args (:arguments parsed)]
                  (run-tool tool-call args (:tools run))
                  (tool-error :invalid-arguments tool-call (:error parsed)))
-        tool-msg (when (= origin :model)
-                   (tool-result-message tool-call result))]
+        tool-msg (if (= origin :model)
+                   (tool-result-message tool-call result)
+                   (host-observation-message tool-call result))]
     (append-observed-event run clock on-event bus
                            (run/tool-result-event run tool-call result tool-msg origin))))
 

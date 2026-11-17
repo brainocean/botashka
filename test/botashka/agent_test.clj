@@ -688,9 +688,8 @@
         command (policy run)]
     (is (= :tool/execute (:command command)))
     (is (= "search_text" (:tool command)))
-    (is (= :clef (:origin command)))
+    (is (= :decision (:origin command)))
     (is (= 0.85 (:confidence command)))))
-
 (deftest clef-policy-falls-back-on-no-tool-or-low-confidence
   (let [mock-no-tool (fn [_] {:choice "no_tool" :probability 0.95 :confidence 0.90})
         policy-no-tool (clef-policy/clef-action-policy {:decide-fn mock-no-tool})
@@ -714,4 +713,4 @@
         cmd (combined-policy run)]
     (is (= :tool/execute (:command cmd)))
     (is (= "list_files" (:tool cmd)))
-    (is (= :clef (:origin cmd)))))
+    (is (= :decision (:origin cmd)))))

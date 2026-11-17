@@ -45,7 +45,7 @@
    When the run status is :awaiting-model and not at max-turns:
      1. Queries Clef with the summarized run state and available tool candidates + 'no_tool'.
      2. If Clef selects a tool with probability >= min-probability and choice != 'no_tool':
-        Returns an action proposal or direct command {:command :tool/execute, :origin :clef, :tool choice}.
+        Returns an action proposal or direct command {:command :tool/execute, :origin :decision, :tool choice}.
      3. If Clef chooses 'no_tool' or confidence is below threshold, returns nil
         (allowing fallback to default-action-policy or subsequent policies).
    
@@ -64,7 +64,7 @@
        (when (and (= (:status run) :awaiting-model)
                   (< (:turn run) (:max-turns run))
                   (not (and (= (:type last-event) :tool-result)
-                            (= (get-in last-event [:data :origin]) :clef))))
+                            (= (get-in last-event [:data :origin]) :decision))))
          (let [tools (or candidate-tools (vec (keys (:tools run))))
                criteria (conj (mapv name tools) "no_tool")
                state-summary (format-run-state-summary run)
@@ -77,7 +77,7 @@
                           (>= (or probability 0.0) min-probability))
                  {:command :tool/execute
                   :tool choice
-                  :origin :clef
+                  :origin :decision
                   :decider (or model "clef-flash")
                   :confidence (or confidence probability)
                   :probability probability
