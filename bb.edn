@@ -8,6 +8,7 @@
              [botashka.tools :as tools]
              [botashka.trace :as trace]
              [clojure.string :as str]
+             [botashka.server :as server]
              [clojure.test :refer [run-tests]])
 
   test
@@ -23,6 +24,12 @@
    :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace}
                                                          :args->opts [:workspace]})]
            (chat/chat-loop opts))}
+
+  web-spike
+  {:doc "Starts the Web UI Spike console: bb web-spike [-p <port>]"
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:p :port}
+                                                         :coerce {:port :long}})]
+           (server/-main))}
 
   run
   {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [-f|--fast-path] [--policy <name>] [<prompt>]"

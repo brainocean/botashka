@@ -1,0 +1,115 @@
+:root {
+  /* 1. 禁用 Pico 在宽屏下的自动倍率放大，固定为专业 IDE 紧凑基准字号 */
+  --pico-font-size: 14px !important;
+
+  /* 2. 收紧行高、栅格与卡片间距 */
+  --pico-line-height: 1.45;
+  --pico-spacing: 0.75rem;
+  --pico-typography-spacing-vertical: 0.75rem;
+  --pico-border-radius: 4px;
+
+  /* 3. 收紧输入控件与按钮内边距 (使高度紧凑在 36px 左右) */
+  --pico-form-element-spacing-vertical: 0.45rem;
+  --pico-form-element-spacing-horizontal: 0.75rem;
+}
+
+body {
+  padding-bottom: 5rem;
+}
+
+/* 顶部状态徽标 */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.badge-online {
+  background-color: #2e7d32;
+  color: #fff;
+}
+
+.badge-offline {
+  background-color: #c62828;
+  color: #fff;
+}
+
+/* Timeline 消息卡片 */
+.timeline-card {
+  margin-bottom: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--pico-primary);
+  border-radius: 4px;
+}
+
+.timeline-card header {
+  margin-bottom: 0.4rem;
+}
+
+.timeline-card pre {
+  margin: 0.4rem 0 0 0;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.85rem;
+  border-radius: 4px;
+}
+
+/* 人在回路审批弹窗卡片 */
+.tool-box {
+  background-color: var(--pico-card-background-color);
+  border: 1px dashed var(--pico-muted-border-color);
+  padding: 0.85rem 1rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.tool-box pre {
+  margin-top: 0.3rem;
+  padding: 0.5rem;
+  font-size: 0.85rem;
+}
+
+/* 打字机流式光标 */
+.streaming-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  background-color: var(--pico-primary);
+  vertical-align: middle;
+  animation: blink 1s infinite;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+/* =============================================================================
+   底部输入栏与按钮组修复
+   1. 解决 Pico group 中 button 换行导致的上下不对齐问题
+   2. 解决 input 与 button 高度不一致以及外框错位问题
+   ============================================================================= */
+[role="group"] {
+  display: flex !important;
+  align-items: stretch !important;
+  margin-bottom: 0 !important;
+}
+
+[role="group"] > input[type="text"] {
+  flex: 1 1 auto;
+  height: auto !important;
+  margin-bottom: 0 !important;
+}
+
+[role="group"] > button {
+  flex: 0 0 auto;
+  width: auto !important;
+  min-width: 5rem;
+  white-space: nowrap !important;
+  height: auto !important;
+  margin-bottom: 0 !important;
+}
