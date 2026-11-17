@@ -1,6 +1,21 @@
 (ns botashka.trace
   (:require [botashka.run :as run]
-            [clojure.string :as str]))
+            [clojure.string :as str])
+  (:import [java.time Duration Instant]))
+
+(defn- format-step-duration
+  "Formats duration in ms or seconds between two ISO timestamp strings."
+  [t-start t-end]
+  (try
+    (when (and (string? t-start) (string? t-end))
+      (let [i1 (Instant/parse t-start)
+            i2 (Instant/parse t-end)
+            ms (.toMillis (Duration/between i1 i2))]
+        (when (>= ms 0)
+          (if (>= ms 1000)
+            (format "%.2fs" (/ ms 1000.0))
+            (str ms "ms")))))
+    (catch Exception _ nil)))
 
 (defn- step-details
   "Purely extracts descriptive detail lines for one trace step based on event type."
@@ -55,6 +70,7 @@
                       " [origin: " (or (:origin data) :model) "]")]
           (and res (not= res-str "nil"))
           (conj (str line-prefix " Payload: " truncated))))
+
       :model-failed
       [(str line-prefix " Error:   " (:error-kind data) " (status: " (:status data) ")")]
 
@@ -67,14 +83,19 @@
       [])))
 
 (defn step->lines
-  "Purely formats an indexed trace step [idx [event state-before state-after]]
+  "Purely formats an indexed trace step [idx [event state-before state-after prev-event]]
    into a sequence of ASCII diagram lines."
-  [total [idx [evt s-before s-after]]]
+  [total [idx [evt s-before s-after prev-evt]]]
   (let [last? (= idx (dec total))
         first? (zero? idx)
         prefix (cond first? "┌──" last? "└──" :else "├──")
         line-prefix (if last? "   " "│  ")
-        header (str prefix " [" idx "] " (:type evt) " (turn: " (:turn s-before) ")")
+        dur-str (when prev-evt
+                  (format-step-duration (:at prev-evt) (:at evt)))
+        header (str prefix " [" idx "] " (:type evt)
+                    " (turn: " (:turn s-before)
+                    (when dur-str (str ", +" dur-str))
+                    ")")
         state-line (if (not= (:status s-before) (:status s-after))
                      (str line-prefix " State:   " (:status s-before) " ──► " (:status s-after))
                      (str line-prefix " State:   " (:status s-before)))
@@ -83,11 +104,12 @@
     (into [header state-line] (concat details separator))))
 
 (defn trace-steps
-  "Purely derives the list of [event state-before state-after] transitions from an event log."
+  "Purely derives the list of [event state-before state-after prev-event] transitions from an event log."
   [events]
   (let [init (run/new-run {:run-id "trace" :max-turns 8})
-        states (reductions run/apply-event init events)]
-    (map vector events states (rest states))))
+        states (reductions run/apply-event init events)
+        prev-events (into [nil] (butlast events))]
+    (map vector events states (rest states) prev-events)))
 
 (defn trace-lines
   "Purely projects an agent run result into a vector of printable ASCII trace graph lines
