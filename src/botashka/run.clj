@@ -246,12 +246,18 @@
   ([run tool-call arguments-or-raw origin]
    (let [tool (or (get-in tool-call [:function :name]) (:tool tool-call))
          call-id (or (:id tool-call) (:call-id tool-call))
+         decider (:decider tool-call)
+         confidence (:confidence tool-call)
+         probability (:probability tool-call)
          parsed? (map? arguments-or-raw)]
      {:type :tool-proposed
       :data (cond-> {:turn (:turn run)
                      :call-id call-id
                      :tool tool
                      :origin origin}
+              decider (assoc :decider decider)
+              confidence (assoc :confidence confidence)
+              probability (assoc :probability probability)
               parsed? (assoc :argument-keys (sort (map name (keys arguments-or-raw)))))
       :evidence (if parsed?
                   {:arguments arguments-or-raw}

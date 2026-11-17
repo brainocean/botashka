@@ -71,12 +71,14 @@
                decision (decide-fn {:state state-summary
                                     :criteria criteria})]
            (when-not (:error decision)
-             (let [{:keys [choice probability confidence]} decision]
+             (let [{:keys [choice probability confidence model]} decision]
                (when (and (seq choice)
                           (not= choice "no_tool")
                           (>= (or probability 0.0) min-probability))
                  {:command :tool/execute
                   :tool choice
                   :origin :clef
+                  :decider (or model "clef-flash")
                   :confidence (or confidence probability)
+                  :probability probability
                   :arguments (arguments-fn run choice)})))))))))

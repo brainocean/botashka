@@ -21,14 +21,17 @@
         (cond-> [(str line-prefix " Model:   " (:model data) " (" (:finish-reason data) ")")]
           (seq tcs)
           (conj (str line-prefix " Propose: " (str/join ", " (map #(get-in % [:function :name]) tcs))))
-
           (and (empty? tcs) (seq content))
           (conj (str line-prefix " Answer:  " (pr-str (subs content 0 (min 60 (count content))))))))
 
       :tool-proposed
-      [(str line-prefix " Action:  :tool/execute [origin: " (or (:origin data) :model) "] -> "
-            (:tool data) " " (pr-str (:arguments evid)))]
-
+      (let [origin (or (:origin data) :model)
+            decider (:decider data)
+            conf (:confidence data)
+            origin-str (cond-> (name origin)
+                         decider (str " (" decider (when conf (str " " (int (* 100 conf)) "%")) ")"))]
+        [(str line-prefix " Action:  :tool/execute [origin: " origin-str "] -> "
+              (:tool data) " " (pr-str (:arguments evid)))])
       :tool-result
       [(str line-prefix " Result:  outcome: " (:outcome data)
             (when (:error-kind data) (str ", error: " (:error-kind data)))

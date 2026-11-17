@@ -72,6 +72,9 @@
   (let [explicit-call (:tool-call command)
         origin (or (:origin command) (:origin explicit-call)
                    (if explicit-call :model :host))
+        decider (or (:decider command) (:decider explicit-call))
+        confidence (or (:confidence command) (:confidence explicit-call))
+        probability (or (:probability command) (:probability explicit-call))
         tool-call (or explicit-call
                       (let [tool-name (or (:tool command) (get-in command [:function :name]))
                             args (:arguments command)
@@ -81,8 +84,10 @@
                         {:id (str "call-" (java.util.UUID/randomUUID))
                          :function {:name tool-name
                                     :arguments args-str}}))]
-    (assoc tool-call :origin origin)))
-
+    (cond-> (assoc tool-call :origin origin)
+      decider (assoc :decider decider)
+      confidence (assoc :confidence confidence)
+      probability (assoc :probability probability))))
 (defn- execute-tool-command
   "Executes one tool command and appends its observed proposal and result events."
   [run clock on-event bus command]
