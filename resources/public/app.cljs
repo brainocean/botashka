@@ -53,6 +53,12 @@
              :status :waiting-approval
              :pending-approval payload)
 
+      :action/approval-settled
+      (swap! app-state (fn [s]
+                         (if (= (get-in s [:pending-approval :id]) (:approval-id payload))
+                           (assoc s :pending-approval nil :status :running)
+                           s)))
+
       (js/console.log "Unhandled event:" (pr-str event)))))
 
 (defn connect-ws! []
@@ -117,11 +123,13 @@
      [:footer {:style {:display "flex" :gap "0.5rem" :justify-content "flex-end"}}
       [:button {:class "secondary outline"
                 :on-click (fn []
+                            (swap! app-state assoc :pending-approval nil :status :running)
                             (send-event! {:type :action/decision
                                           :payload {:approval-id (:id approval)
                                                     :approved? false}}))}
        "拒绝 (Deny)"]
       [:button {:on-click (fn []
+                            (swap! app-state assoc :pending-approval nil :status :running)
                             (send-event! {:type :action/decision
                                           :payload {:approval-id (:id approval)
                                                     :approved? true}}))}

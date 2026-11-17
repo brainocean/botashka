@@ -82,6 +82,8 @@
           (swap! session-state assoc
                  :status :running
                  :pending-approval nil)
+          (broadcast! {:type :action/approval-settled
+                       :payload {:approval-id approval-id}})
           (if approved?
             :allow
             {:decision :deny
