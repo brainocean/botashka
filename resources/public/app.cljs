@@ -10,9 +10,10 @@
 (defonce app-state
   (r/atom {:connected? false
            :status :idle            ;; :idle | :running | :waiting-approval
-           :timeline []             ;; [{:id ... :role :user/:agent :text ... :tool-call ...}]
+           :timeline []             ;; [{:id ... :role :user/:agent/:tool-proposed/:tool/:system ...}]
            :streaming-text ""       ;; 正在打字输出的临时文本
            :pending-approval nil    ;; {:id ... :tool ... :cmd ...}
+           :workspace "."
            :input-text ""}))
 
 ;; =============================================================================
@@ -41,34 +42,21 @@
       :token/delta
       (swap! app-state update :streaming-text str (:delta payload))
 
-      ;; 3. Agent 思考/回答小结步骤完成
-      :step/finish
-      (let [final-text (:text payload)]
-        (swap! app-state (fn [s]
-                           (-> s
-                               (update :timeline conj {:id (str (random-uuid))
-                                                       :role :agent
-                                                       :text final-text})
-                               (assoc :streaming-text ""
-                                      :status :idle)))))
+      ;; 3. 时间线追加新条目
+      :timeline/append
+      (swap! app-state update :timeline conj payload)
 
-      ;; 4. 人在回路：请求工具执行确认
+      ;; 4. 运行收敛 / 结束
+      :run/settled
+      (swap! app-state assoc
+             :status (:status payload)
+             :streaming-text "")
+
+      ;; 5. 人在回路：请求工具执行确认
       :action/approval-required
       (swap! app-state assoc
              :status :waiting-approval
              :pending-approval payload)
-
-      ;; 5. 工具执行结果回显
-      :action/completed
-      (let [result (:result payload)]
-        (swap! app-state (fn [s]
-                           (-> s
-                               (assoc :status :idle
-                                      :pending-approval nil)
-                               (update :timeline conj {:id (str (random-uuid))
-                                                       :role :tool
-                                                       :tool (:tool payload)
-                                                       :result result})))))
 
       ;; 默认未知事件
       (js/console.log "Unhandled event:" (pr-str event)))))
@@ -106,15 +94,16 @@
 
 (defn header-view []
   (let [connected? (:connected? @app-state)
-        status (:status @app-state)]
-    [:header {:style {:display "flex" :justify-content "space-between" :align-items "center" :padding "1rem 0"}}
+        status (:status @app-state)
+        ws (:workspace @app-state)]
+    [:header {:style {:display "flex" :justify-content "space-between" :align-items "center" :padding "0.6rem 0"}}
      [:hgroup {:style {:margin 0}}
-      [:h2 {:style {:margin 0}} "Botashka"]
-      [:p {:style {:margin 0}} "Web Console (Zero-Build Spike)"]]
+      [:h3 {:style {:margin 0}} "Botashka"]
+      [:small {:style {:margin 0 :color "var(--pico-muted-color)"}} (str "Workspace: " ws)]]
      [:div
       [:span {:class (str "badge " (if connected? "badge-online" "badge-offline"))}
        (if connected? "🟢 CONNECTED" "🔴 DISCONNECTED")]
-      [:span {:style {:margin-left "0.5rem" :color "var(--pico-muted-color)" :font-size "0.85rem"}}
+      [:span {:style {:margin-left "0.5rem" :color "var(--pico-muted-color)" :font-size "0.8rem"}}
        (str "State: " (name status))]]]))
 
 (defn approval-modal-view []
@@ -125,7 +114,7 @@
      [:div
       [:p [:strong "Tool: "] [:code (str (:tool approval))]]
       [:p [:strong "Command: "] [:pre [:code (:cmd approval)]]]]
-     [:footer {:style {:display "flex" :gap "1rem" :justify-content "flex-end"}}
+     [:footer {:style {:display "flex" :gap "0.5rem" :justify-content "flex-end"}}
       [:button {:class "secondary outline"
                 :on-click (fn []
                             (send-event! {:type :action/decision
@@ -138,17 +127,27 @@
                                                     :approved? true}}))}
        "批准执行 (Approve)"]]]))
 
+(defn format-tool-args [args]
+  (cond
+    (map? args) (pr-str args)
+    (string? args) args
+    :else (str args)))
+
 (defn timeline-item-view [item]
   [:article {:key (:id item) :class "timeline-card"}
    [:header {:style {:display "flex" :justify-content "space-between"}}
     [:strong (case (:role item)
                :user "👤 You"
                :agent "🤖 Botashka"
-               :tool (str "🔧 Tool (" (:tool item) ")"))]]
+               :tool-proposed (str "● Tool Proposed: " (:tool item))
+               :tool (str "🔧 Tool Result: " (:tool item))
+               :system "⚠️ System")]]
    (case (:role item)
-     :user [:p (:text item)]
+     :user [:p {:style {:margin 0}} (:text item)]
      :agent [:div {:style {:white-space "pre-wrap"}} (:text item)]
-     :tool [:pre [:code (:result item)]])])
+     :tool-proposed [:pre [:code (str "Arguments: " (format-tool-args (:args item)))]]
+     :tool [:pre [:code (:result item)]]
+     :system [:p {:style {:margin 0 :color "var(--pico-del-color)"}} (:text item)])])
 
 (defn timeline-view []
   (let [{:keys [timeline streaming-text]} @app-state]
@@ -158,7 +157,7 @@
      ;; 流式打字机卡片
      (when (not (empty? streaming-text))
        [:article {:class "timeline-card"}
-        [:header [:strong "🤖 Botashka (Streaming...)"]]
+        [:header [:strong "🤖 Botashka (Thinking / Responding...)"]]
         [:div {:style {:white-space "pre-wrap"}}
          streaming-text
          [:span {:class "streaming-cursor"}]]])]))
@@ -171,20 +170,12 @@
                          (.preventDefault e)
                          (when (and (not (empty? (.trim input-text))) (not disabled?))
                            (let [text (.trim input-text)]
-                             ;; 乐观更新本地 UI
-                             (swap! app-state (fn [s]
-                                                (-> s
-                                                    (update :timeline conj {:id (str (random-uuid))
-                                                                            :role :user
-                                                                            :text text})
-                                                    (assoc :input-text ""
-                                                           :status :running))))
-                             ;; 发送给服务端
+                             (swap! app-state assoc :input-text "" :status :running)
                              (send-event! {:type :prompt/submit
                                            :payload {:text text}}))))}
      [:fieldset {:role "group"}
       [:input {:type "text"
-               :placeholder (if disabled? "请等待当前任务或处理待办确认..." "输入 Prompt / 指令...")
+               :placeholder (if disabled? "Botashka 正在处理任务..." "输入 Prompt / 需求...")
                :disabled disabled?
                :value input-text
                :on-change (fn [e]

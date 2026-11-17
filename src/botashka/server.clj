@@ -1,8 +1,14 @@
 (ns botashka.server
-  (:require [org.httpkit.server :as httpkit]
+  (:require [babashka.fs :as fs]
+            [botashka.agent :as agent]
+            [botashka.bus :as bus]
+            [botashka.chat :as chat]
+            [botashka.tools :as tools]
+            [clojure.core.async :as async]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [org.httpkit.server :as httpkit]))
 
 ;; =============================================================================
 ;; 1. 会话状态与客户端连接池 (Functional Core State & Imperative Registry)
@@ -11,10 +17,13 @@
 (defonce clients (atom #{}))
 
 (defonce session-state
-  (atom {:timeline []
-         :status :idle
-         :streaming-text ""
-         :pending-approval nil}))
+  (atom {:timeline []             ;; 会话呈现的时间线
+         :status :idle             ;; :idle | :running | :waiting-approval
+         :streaming-text ""        ;; 正在推过来的临时 token
+         :pending-approval nil     ;; 待审批项 {:id ... :tool ... :args ...}
+         :messages []              ;; 维护底层 Agent 的多轮对话历史
+         :turn-count 1             ;; 当前轮次
+         :workspace "."}))
 
 (defn- broadcast! [event]
   (let [payload-str (pr-str event)]
@@ -23,86 +32,150 @@
 
 (defn- sync-client! [ch]
   (httpkit/send! ch (pr-str {:type :session/sync
-                             :payload @session-state})))
+                             :payload (dissoc @session-state :messages)})))
 
 ;; =============================================================================
-;; 2. Mock Agent 流式与审批引擎 (Spike Simulation)
+;; 2. 真实 Agent 运行循环与 Bus 事件转发 (Real Agent Shell Runner)
 ;; =============================================================================
 
-(defn- run-mock-agent-turn! [user-prompt]
+(defn- default-system [workspace]
+  (str "You are Botashka, an expert coding agent. "
+       "You are operating inside the workspace directory: " workspace ". "
+       "All file operations (read_file, write_file, search_text, list_files) must use paths relative to this workspace root. "
+       "run_command executes shell commands directly within this workspace root directory."))
+
+(defn- run-agent-turn! [user-prompt]
   (Thread/startVirtualThread
    (fn []
-     (try
-       ;; 1. 追加用户消息进 timeline
-      (swap! session-state
-             (fn [s]
-               (-> s
-                   (assoc :status :running)
-                   (update :timeline conj {:id (str (java.util.UUID/randomUUID))
-                                           :role :user
-                                           :text user-prompt}))))
+     (let [workspace (:workspace @session-state)
+           canonical-ws (str (fs/canonicalize workspace))
+           registry (tools/code-tool-registry canonical-ws)
+           system-prompt (default-system canonical-ws)
+           user-item {:id (str (java.util.UUID/randomUUID))
+                      :role :user
+                      :text user-prompt}
+           b (bus/new-bus)
+           stream-ch (bus/subscribe! b :stream (async/sliding-buffer 256))
+           canonical-ch (bus/subscribe! b :canonical 100)
+           done-promise (promise)]
 
-      ;; 2. 模拟打字机 Token Streaming
-      (let [thought-tokens ["思考中" "..." " 收到" "您的" "需求" "：\"" user-prompt "\"。\n"
-                            "为了" "完成" "任务" "，我需要" "先执行" " `ls -la` " "检查" "工作区" "目录" "结构" "。"]]
-        (doseq [tok thought-tokens]
-          (Thread/sleep 120)
-          (swap! session-state update :streaming-text str tok)
-          (broadcast! {:type :token/delta
-                       :payload {:delta tok}})))
+       ;; 1. 更新本地与前端状态
+       (swap! session-state (fn [s]
+                              (-> s
+                                  (assoc :status :running
+                                         :streaming-text "")
+                                  (update :timeline conj user-item))))
+       (broadcast! {:type :timeline/append
+                    :payload user-item})
 
-      ;; 3. 步骤完成，归档到 timeline
-      (let [full-thought (:streaming-text @session-state)]
-        (swap! session-state (fn [s]
-                               (-> s
-                                   (assoc :streaming-text ""
-                                          :status :waiting-approval)
-                                   (update :timeline conj {:id (str (java.util.UUID/randomUUID))
-                                                           :role :agent
-                                                           :text full-thought}))))
-        (broadcast! {:type :step/finish
-                     :payload {:text full-thought}}))
+       ;; 2. 异步监听 stream topic (高频 Token)
+       (Thread/startVirtualThread
+        (fn []
+          (loop []
+            (when-let [msg (async/<!! stream-ch)]
+              (when (= (:kind msg) :token)
+                (let [delta (:payload msg)]
+                  (swap! session-state update :streaming-text str delta)
+                  (broadcast! {:type :token/delta
+                               :payload {:delta delta}})))
+              (recur)))))
 
-      ;; 4. 触发人在回路：敏感工具调用等待审批
-      (let [approval-payload {:id (str (java.util.UUID/randomUUID))
-                              :tool "bash"
-                              :cmd "ls -la"}]
-        (swap! session-state assoc :pending-approval approval-payload)
-        (broadcast! {:type :action/approval-required
-                     :payload approval-payload}))
-      (catch Exception e
-        (println "Error in mock agent runner:" e))))))
+       ;; 3. 异步监听 canonical topic (结构化事件)
+       (Thread/startVirtualThread
+        (fn []
+          (loop []
+            (when-let [msg (async/<!! canonical-ch)]
+              (let [evt (:payload msg)]
+                (case (:type evt)
+                  :tool-proposed
+                  (let [tool-item {:id (str (java.util.UUID/randomUUID))
+                                   :role :tool-proposed
+                                   :tool (get-in evt [:data :tool])
+                                   :args (get-in evt [:evidence :arguments])}]
+                    ;; 将之前的思考打字内容落地，并追加工具提议
+                    (let [streaming (:streaming-text @session-state)]
+                      (when-not (empty? streaming)
+                        (let [agent-item {:id (str (java.util.UUID/randomUUID))
+                                          :role :agent
+                                          :text streaming}]
+                          (swap! session-state (fn [s]
+                                                 (-> s
+                                                     (assoc :streaming-text "")
+                                                     (update :timeline conj agent-item))))
+                          (broadcast! {:type :timeline/append
+                                       :payload agent-item}))))
+                    (swap! session-state update :timeline conj tool-item)
+                    (broadcast! {:type :timeline/append
+                                 :payload tool-item}))
 
-(defn- handle-approval-decision! [approval-id approved?]
-  (Thread/startVirtualThread
-   (fn []
-     (try
-       (let [pending (:pending-approval @session-state)]
-        (when (= (:id pending) approval-id)
-          (if approved?
-            ;; 用户批准：执行并回显结果
-            (let [mock-result "total 32\ndrwxr-xr-x  12 user staff  384 Nov 17 18:00 .\ndrwxr-xr-x   6 user staff  192 Nov 17 17:00 ..\n-rw-r--r--   1 user staff 1024 Nov 17 17:30 deps.edn\n-rw-r--r--   1 user staff 2048 Nov 17 17:45 README.md"]
-              (swap! session-state (fn [s]
-                                     (-> s
-                                         (assoc :status :idle
-                                                :pending-approval nil)
-                                         (update :timeline conj {:id (str (java.util.UUID/randomUUID))
-                                                                 :role :tool
-                                                                 :tool (:tool pending)
-                                                                 :result mock-result}))))
-              (broadcast! {:type :action/completed
-                           :payload {:tool (:tool pending)
-                                     :result mock-result}}))
-            ;; 用户拒绝
-            (do
-              (swap! session-state assoc
-                     :status :idle
-                     :pending-approval nil)
-              (broadcast! {:type :action/completed
-                           :payload {:tool (:tool pending)
-                                     :result "Command execution denied by user."}})))))
-      (catch Exception e
-        (println "Error in handling approval:" e))))))
+                  :tool-result
+                  (let [res (get-in evt [:evidence :result])
+                        tool-name (get-in evt [:data :tool])
+                        result-str (if (:error res)
+                                     (str "ERROR: " (pr-str (:error res)))
+                                     (if (string? res) res (pr-str res)))
+                        result-item {:id (str (java.util.UUID/randomUUID))
+                                     :role :tool
+                                     :tool tool-name
+                                     :result result-str}]
+                    (swap! session-state update :timeline conj result-item)
+                    (broadcast! {:type :timeline/append
+                                 :payload result-item}))
+
+                  :run-finished
+                  (deliver done-promise true)
+
+                  nil))
+              (recur)))))
+
+       ;; 4. 真正执行 Agent Run!
+       (try
+         (let [prev-messages (:messages @session-state)
+               result (agent/run! {:prompt user-prompt
+                                   :messages prev-messages
+                                   :system system-prompt
+                                   :tools registry
+                                   :max-turns 10
+                                   :bus b})]
+           ;; 等待事件消费完毕
+           (deref done-promise 5000 false)
+           ;; 收尾最后的思考文字
+           (let [streaming (:streaming-text @session-state)]
+             (when-not (empty? streaming)
+               (let [agent-item {:id (str (java.util.UUID/randomUUID))
+                                 :role :agent
+                                 :text streaming}]
+                 (swap! session-state (fn [s]
+                                        (-> s
+                                            (assoc :streaming-text "")
+                                            (update :timeline conj agent-item))))
+                 (broadcast! {:type :timeline/append
+                              :payload agent-item}))))
+           ;; 更新多轮 messages 和 idle 状态
+           (swap! session-state (fn [s]
+                                  (-> s
+                                      (assoc :status :idle
+                                             :streaming-text "")
+                                      (assoc :messages (or (:messages result) prev-messages))
+                                      (update :turn-count inc))))
+           (broadcast! {:type :run/settled
+                        :payload {:status :idle}}))
+         (catch Exception e
+           (let [err-msg (.getMessage e)
+                 err-item {:id (str (java.util.UUID/randomUUID))
+                           :role :system
+                           :text (str "执行错误: " err-msg)}]
+             (swap! session-state (fn [s]
+                                    (-> s
+                                        (assoc :status :idle
+                                               :streaming-text "")
+                                        (update :timeline conj err-item))))
+             (broadcast! {:type :timeline/append
+                          :payload err-item})
+             (broadcast! {:type :run/settled
+                          :payload {:status :idle}})))
+         (finally
+           (bus/close-bus! b)))))))
 
 ;; =============================================================================
 ;; 3. WebSocket 消息处理
@@ -114,10 +187,7 @@
           {:keys [type payload]} event]
       (case type
         :prompt/submit
-        (run-mock-agent-turn! (:text payload))
-
-        :action/decision
-        (handle-approval-decision! (:approval-id payload) (:approved? payload))
+        (run-agent-turn! (:text payload))
 
         (println "Unknown event from client:" event)))
     (catch Exception e
@@ -162,21 +232,18 @@
 (defn app-handler [req]
   (let [uri (:uri req)]
     (cond
-      ;; WebSocket 端点
       (= uri "/ws")
       (ws-handler req)
 
-      ;; 首页
       (or (= uri "/") (= uri "/index.html"))
       (serve-file "resources/public/index.html")
 
-      ;; 前端 ClojureScript 代码
       (= uri "/app.cljs")
       (serve-file "resources/public/app.cljs")
 
-      ;; 应用自定义 CSS
       (= uri "/botashka.css")
       (serve-file "resources/public/botashka.css")
+
       (str/starts-with? uri "/vendor/")
       (serve-file (str "resources/public" uri))
 
@@ -196,12 +263,13 @@
                   (when-let [p (System/getenv "BOTASHKA_PORT")]
                     (Integer/parseInt p))
                   7890)
-         host (or (:host opts) "127.0.0.1")]
-     (println (str "Starting Botashka Web Console at http://" host ":" port " ..."))
+         host (or (:host opts) "127.0.0.1")
+         workspace (or (:workspace opts) ".")]
+     (swap! session-state assoc :workspace workspace)
+     (println (str "Starting Botashka Web Console at http://" host ":" port " (workspace: " workspace ") ..."))
      (httpkit/run-server app-handler {:ip host :port port}))))
 
 (defn -main [& args]
   (let [server (start-server!)]
     (println "Server running. Press Ctrl+C to stop.")
-    ;; 主线程保持运行
     @(promise)))
