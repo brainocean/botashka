@@ -42,10 +42,22 @@
          (update :messages conj {:role "user" :content prompt})
          (assoc :status :awaiting-model)))
 
+   :decision-requested
+   (fn [run _data _evidence]
+     (assoc run :status :awaiting-decision-response))
+
+   :decision-responded
+   (fn [run data evidence]
+     (assoc run :status :awaiting-model
+                :last-decision {:choice (:choice data)
+                                :probability (:probability data)
+                                :confidence (:confidence data)
+                                :decider (:decider data)
+                                :decision-id (:decision-id data)}))
+
    :model-requested
    (fn [run _data _evidence]
      (assoc run :status :awaiting-model-response))
-
    :model-responded
    (fn [run _data {:keys [assistant-message]}]
      (let [tool-calls (requested-tool-calls assistant-message)]
@@ -240,6 +252,26 @@
            :status (:status error)}
     :evidence {:error error}}))
 
+
+(defn decision-requested-event
+  "Builds the observed event for an outgoing decision model request."
+  [run decider criteria state-summary]
+  {:type :decision-requested
+   :data {:turn (:turn run)
+          :decider decider
+          :criteria criteria}
+   :evidence {:state state-summary}})
+
+(defn decision-responded-event
+  "Builds the observed event for a decision model response."
+  [run decision]
+  {:type :decision-responded
+   :data {:turn (:turn run)
+          :decider (:model decision)
+          :choice (:choice decision)
+          :probability (:probability decision)
+          :confidence (:confidence decision)}
+   :evidence {:decision decision}})
 (defn tool-proposed-event
   ([run tool-call arguments-or-raw]
    (tool-proposed-event run tool-call arguments-or-raw (or (:origin tool-call) :model)))

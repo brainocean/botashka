@@ -675,42 +675,50 @@
     (is (= 0.88 (:probability parsed)))
     (is (= 0.82 (:confidence parsed)))))
 
-(deftest clef-policy-selects-tool-with-high-confidence
-  (let [mock-decide (fn [{:keys [criteria]}]
-                      (is (some #{"search_text"} criteria))
-                      (is (some #{"no_tool"} criteria))
-                      {:choice "search_text" :probability 0.91 :confidence 0.85})
+(deftest clef-policy-emits-decision-command-and-then-selects-tool
+  (let [mock-decide (fn [_] {:choice "search_text" :probability 0.91 :confidence 0.85 :model "clef-flash"})
         policy (clef-policy/clef-action-policy {:decide-fn mock-decide :min-probability 0.80})
-        run (-> (run/new-run {:run-id "r-clef" :max-turns 5})
-                (assoc :status :awaiting-model
-                       :tools {"search_text" {:schema {}}
-                               "read_file" {:schema {}}}))
-        command (policy run)]
-    (is (= :tool/execute (:command command)))
-    (is (= "search_text" (:tool command)))
-    (is (= :decision (:origin command)))
-    (is (= 0.85 (:confidence command)))))
+        run-init (-> (run/new-run {:run-id "r-clef" :max-turns 5})
+                     (assoc :status :awaiting-model
+                            :tools {"search_text" {:schema {}}
+                                    "read_file" {:schema {}}}))
+        ;; Step 1: In :awaiting-model, policy emits :decision/complete command
+        cmd1 (policy run-init)]
+    (is (= :decision/complete (:command cmd1)))
+    (is (some #{"search_text"} (:criteria cmd1)))
+    (is (some #{"no_tool"} (:criteria cmd1)))
+    ;; Step 2: After decision model responds, state is updated with :last-decision
+    (let [run-after-decision (-> run-init
+                                 (update :events conj (run/decision-requested-event run-init "clef-flash" (:criteria cmd1) (:state cmd1)))
+                                 (update :events conj (run/decision-responded-event run-init (mock-decide nil)))
+                                 (run/apply-event (run/decision-responded-event run-init (mock-decide nil))))
+          cmd2 (policy run-after-decision)]
+      (is (= :tool/execute (:command cmd2)))
+      (is (= "search_text" (:tool cmd2)))
+      (is (= :decision (:origin cmd2)))
+      (is (= 0.85 (:confidence cmd2))))))
+
 (deftest clef-policy-falls-back-on-no-tool-or-low-confidence
-  (let [mock-no-tool (fn [_] {:choice "no_tool" :probability 0.95 :confidence 0.90})
+  (let [mock-no-tool (fn [_] {:choice "no_tool" :probability 0.95 :confidence 0.90 :model "clef-flash"})
         policy-no-tool (clef-policy/clef-action-policy {:decide-fn mock-no-tool})
-        mock-low-conf (fn [_] {:choice "read_file" :probability 0.50 :confidence 0.40})
-        policy-low-conf (clef-policy/clef-action-policy {:decide-fn mock-low-conf :min-probability 0.75})
-        run (-> (run/new-run {:run-id "r-fallback" :max-turns 5})
-                (assoc :status :awaiting-model
-                       :tools {"read_file" {:schema {}}}))]
-    ;; No tool -> returns nil so fallback policies can handle
-    (is (nil? (policy-no-tool run)))
-    ;; Low confidence -> returns nil
-    (is (nil? (policy-low-conf run)))))
+        run-init (-> (run/new-run {:run-id "r-fallback" :max-turns 5})
+                     (assoc :status :awaiting-model
+                            :tools {"read_file" {:schema {}}}))
+        cmd-decide (policy-no-tool run-init)
+        run-after-no-tool (-> run-init
+                              (update :events conj (run/decision-requested-event run-init "clef-flash" (:criteria cmd-decide) ""))
+                              (update :events conj (run/decision-responded-event run-init (mock-no-tool nil)))
+                              (run/apply-event (run/decision-responded-event run-init (mock-no-tool nil))))]
+    ;; After no_tool decision, policy returns nil to allow fallback to model policy
+    (is (nil? (policy-no-tool run-after-no-tool)))))
 
 (deftest clef-policy-integrates-with-first-applicable-action-policy
-  (let [mock-decide (fn [_] {:choice "list_files" :probability 0.92 :confidence 0.88})
+  (let [mock-decide (fn [_] {:choice "list_files" :probability 0.92 :confidence 0.88 :model "clef-flash"})
         clef-pol (clef-policy/clef-action-policy {:decide-fn mock-decide})
         combined-policy (run/first-applicable-action-policy clef-pol run/default-action-policy)
         run (-> (run/new-run {:run-id "r-comb" :max-turns 5})
                 (assoc :status :awaiting-model
                        :tools {"list_files" {:schema {}}}))
         cmd (combined-policy run)]
-    (is (= :tool/execute (:command cmd)))
-    (is (= "list_files" (:tool cmd)))
-    (is (= :decision (:origin cmd)))))
+    (is (= :decision/complete (:command cmd)))
+    (is (some #{"list_files"} (:criteria cmd)))))

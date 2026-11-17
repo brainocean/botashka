@@ -167,6 +167,20 @@
                                 [(run/run-started-event run)
                                  (run/user-submitted-event (:prompt command))])
 
+        ;; 3.5 Decision model completion
+        [true :decision/complete]
+        (let [decider (or (:decider command) "clef-flash")
+              criteria (:criteria command)
+              state-summary (:state command)
+              decide-fn (or (:decide-fn command)
+                            (let [decide-var (resolve 'botashka.clef-client/decide!)]
+                              (if decide-var @decide-var (constantly {:choice "no_tool"}))))
+              run (append-observed-event run clock on-event bus
+                                         (run/decision-requested-event run decider criteria state-summary))
+              decision (decide-fn {:state state-summary :criteria criteria})]
+          (append-observed-event run clock on-event bus
+                                 (run/decision-responded-event run decision)))
+
         ;; 4. Model completion
         [true :model/complete]
         (let [model-req (or (:request command) (dissoc command :command :origin))

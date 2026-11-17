@@ -12,6 +12,17 @@
       :user-submitted
       [(str line-prefix " Input:   " (pr-str (subs (:prompt evid) 0 (min 60 (count (:prompt evid))))))]
 
+      :decision-requested
+      [(str line-prefix " Command: :decision/complete [decider: " (or (:decider data) "clef-flash")
+            ", criteria: " (str/join ", " (:criteria data)) "]")]
+
+      :decision-responded
+      (let [conf (:confidence data)
+            prob (:probability data)
+            conf-str (if conf (str (int (* 100 conf)) "%") (when prob (str (int (* 100 prob)) "%")))]
+        [(str line-prefix " Decision: " (or (:decider data) "clef-flash") " ──► "
+              (:choice data) (when conf-str (str " (" conf-str ")")))])
+
       :model-requested
       [(str line-prefix " Command: :model/complete (tools: " (:tool-count data) ", msgs: " (:message-count data) ")")]
 
