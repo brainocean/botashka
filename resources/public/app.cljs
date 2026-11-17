@@ -12,7 +12,7 @@
            :status :idle            ;; :idle | :running | :waiting-approval
            :timeline []             ;; [{:id ... :role :user/:agent/:tool-proposed/:tool/:system ...}]
            :streaming-text ""       ;; 正在打字输出的临时文本
-           :pending-approval nil    ;; {:id ... :tool ... :cmd ...}
+           :pending-approval nil    ;; {:id ... :tool ... :args ...}
            :workspace "."
            :input-text ""}))
 
@@ -34,31 +34,25 @@
 (defn handle-server-event! [event]
   (let [{:keys [type payload]} event]
     (case type
-      ;; 1. 会话初次握手同步 (多端/刷新)
       :session/sync
       (swap! app-state merge payload {:connected? true})
 
-      ;; 2. 流式 Token 接收 (打字机效果)
       :token/delta
       (swap! app-state update :streaming-text str (:delta payload))
 
-      ;; 3. 时间线追加新条目
       :timeline/append
       (swap! app-state update :timeline conj payload)
 
-      ;; 4. 运行收敛 / 结束
       :run/settled
       (swap! app-state assoc
              :status (:status payload)
              :streaming-text "")
 
-      ;; 5. 人在回路：请求工具执行确认
       :action/approval-required
       (swap! app-state assoc
              :status :waiting-approval
              :pending-approval payload)
 
-      ;; 默认未知事件
       (js/console.log "Unhandled event:" (pr-str event)))))
 
 (defn connect-ws! []
@@ -106,14 +100,20 @@
       [:span {:style {:margin-left "0.5rem" :color "var(--pico-muted-color)" :font-size "0.8rem"}}
        (str "State: " (name status))]]]))
 
+(defn format-tool-args [args]
+  (cond
+    (map? args) (pr-str args)
+    (string? args) args
+    :else (str args)))
+
 (defn approval-modal-view []
   (when-let [approval (:pending-approval @app-state)]
-    [:article {:class "tool-box"}
+    [:article {:class "tool-box" :style {:border-color "var(--pico-primary)"}}
      [:header
-      [:strong "⚠️ 权限请求：允许执行以下工具调用吗？"]]
+      [:strong "⚠️ 权限请求：允许执行以下敏感工具调用吗？"]]
      [:div
       [:p [:strong "Tool: "] [:code (str (:tool approval))]]
-      [:p [:strong "Command: "] [:pre [:code (:cmd approval)]]]]
+      [:p [:strong "Arguments: "] [:pre [:code (format-tool-args (:args approval))]]]]
      [:footer {:style {:display "flex" :gap "0.5rem" :justify-content "flex-end"}}
       [:button {:class "secondary outline"
                 :on-click (fn []
@@ -127,27 +127,43 @@
                                                     :approved? true}}))}
        "批准执行 (Approve)"]]]))
 
-(defn format-tool-args [args]
-  (cond
-    (map? args) (pr-str args)
-    (string? args) args
-    :else (str args)))
-
 (defn timeline-item-view [item]
   [:article {:key (:id item) :class "timeline-card"}
-   [:header {:style {:display "flex" :justify-content "space-between"}}
-    [:strong (case (:role item)
-               :user "👤 You"
-               :agent "🤖 Botashka"
-               :tool-proposed (str "● Tool Proposed: " (:tool item))
-               :tool (str "🔧 Tool Result: " (:tool item))
-               :system "⚠️ System")]]
    (case (:role item)
-     :user [:p {:style {:margin 0}} (:text item)]
-     :agent [:div {:style {:white-space "pre-wrap"}} (:text item)]
-     :tool-proposed [:pre [:code (str "Arguments: " (format-tool-args (:args item)))]]
-     :tool [:pre [:code (:result item)]]
-     :system [:p {:style {:margin 0 :color "var(--pico-del-color)"}} (:text item)])])
+     :user
+     [:div
+      [:header {:style {:display "flex" :justify-content "space-between"}}
+       [:strong "👤 You"]]
+      [:p {:style {:margin 0}} (:text item)]]
+
+     :agent
+     [:div
+      [:header {:style {:display "flex" :justify-content "space-between"}}
+       [:strong "🤖 Botashka"]]
+      [:div {:style {:white-space "pre-wrap"}} (:text item)]]
+
+     :tool-proposed
+     [:details {:open false}
+      [:summary {:style {:cursor "pointer"}}
+       [:strong (str "● Tool Proposed: " (:tool item))]]
+      [:pre {:style {:margin-top "0.5rem"}}
+       [:code (str "Arguments: " (format-tool-args (:args item)))]]]
+
+     :tool
+     (let [err? (:error? item)]
+       [:details {:open (boolean err?)}
+        [:summary {:style {:cursor "pointer" :color (if err? "var(--pico-del-color)" "inherit")}}
+         [:strong (if err?
+                    (str "✖ Tool Failed: " (:tool item))
+                    (str "✔ Tool Result: " (:tool item)))]]
+        [:pre {:style {:margin-top "0.5rem"
+                       :border (if err? "1px solid var(--pico-del-color)" "none")}}
+         [:code (:result item)]]])
+
+     :system
+     [:div
+      [:header [:strong {:style {:color "var(--pico-del-color)"}} "⚠️ System"]]
+      [:p {:style {:margin 0 :color "var(--pico-del-color)"}} (:text item)]])])
 
 (defn timeline-view []
   (let [{:keys [timeline streaming-text]} @app-state]

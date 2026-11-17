@@ -14,10 +14,11 @@
   test
   {:doc "Runs the deterministic automated test suite"
    :task (do
-           (require 'botashka.agent-test)
-           (let [r (run-tests 'botashka.agent-test)]
-             (when (or (pos? (:fail r)) (pos? (:error r)))
-               (System/exit 1))))}
+          (require 'botashka.agent-test)
+          (require 'botashka.server-test)
+          (let [r (run-tests 'botashka.agent-test 'botashka.server-test)]
+            (when (or (pos? (:fail r)) (pos? (:error r)))
+              (System/exit 1))))}
 
   chat
   {:doc "Starts an interactive multi-turn REPL chat session in a workspace: bb chat [-w <dir>] [<dir>]"
@@ -25,11 +26,17 @@
                                                          :args->opts [:workspace]})]
            (chat/chat-loop opts))}
 
+  web
+  {:doc "Starts the Web UI console: bb web [-w <dir>] [-p <port>]"
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :p :port}
+                                                         :coerce {:port :long :workspace :string}})]
+           (server/-main opts))}
+
   web-spike
-  {:doc "Starts the Web UI Spike console: bb web-spike [-p <port>]"
-   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:p :port}
-                                                         :coerce {:port :long}})]
-           (server/-main))}
+  {:doc "Alias for bb web"
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :p :port}
+                                                         :coerce {:port :long :workspace :string}})]
+           (server/-main opts))}
 
   run
   {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [-f|--fast-path] [--policy <name>] [<prompt>]"

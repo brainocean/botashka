@@ -3,7 +3,9 @@
             [botashka.agent :as agent]
             [botashka.bus :as bus]
             [botashka.chat :as chat]
+            [botashka.command-executor :as command-executor]
             [botashka.tools :as tools]
+            [cheshire.core :as json]
             [clojure.core.async :as async]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -25,6 +27,8 @@
          :turn-count 1             ;; 当前轮次
          :workspace "."}))
 
+(defonce pending-approvals (atom {})) ;; approval-id -> promise
+
 (defn- broadcast! [event]
   (let [payload-str (pr-str event)]
     (doseq [ch @clients]
@@ -35,7 +39,57 @@
                              :payload (dissoc @session-state :messages)})))
 
 ;; =============================================================================
-;; 2. 真实 Agent 运行循环与 Bus 事件转发 (Real Agent Shell Runner)
+;; 2. 人在回路：安全授权策略 (Human-in-the-loop Authorization Policy)
+;; =============================================================================
+
+(def ^:private sensitive-tools #{"run_command" "write_file"})
+
+(defn- extract-tool-details [command]
+  (let [explicit-call (:tool-call command)
+        tname (or (:tool command)
+                  (get-in command [:tool-call :function :name])
+                  (get-in command [:function :name]))
+        raw-args (or (:arguments command)
+                     (get-in command [:tool-call :function :arguments])
+                     (get-in command [:function :arguments]))
+        parsed-args (cond
+                      (map? raw-args) raw-args
+                      (string? raw-args) (try (json/parse-string raw-args true) (catch Exception _ raw-args))
+                      :else raw-args)]
+    {:tool tname
+     :arguments parsed-args}))
+
+(defn- web-authorization-policy
+  "Asks human approval via WebSocket for sensitive commands (write_file, run_command),
+   blocking only the virtual execution thread until client approves or denies."
+  [_run command]
+  (let [{:keys [tool arguments]} (extract-tool-details command)]
+    (if (contains? sensitive-tools tool)
+      (let [approval-id (str (java.util.UUID/randomUUID))
+            p (promise)
+            approval-payload {:id approval-id
+                              :tool tool
+                              :args arguments}]
+        (swap! pending-approvals assoc approval-id p)
+        (swap! session-state assoc
+               :status :waiting-approval
+               :pending-approval approval-payload)
+        (broadcast! {:type :action/approval-required
+                     :payload approval-payload})
+        ;; 阻塞虚拟线程等待前端做出决定
+        (let [approved? (deref p 300000 false)] ;; 5 分钟超时保护
+          (swap! pending-approvals dissoc approval-id)
+          (swap! session-state assoc
+                 :status :running
+                 :pending-approval nil)
+          (if approved?
+            :allow
+            {:decision :deny
+             :reason (str "Tool `" tool "` was rejected by human operator in Web console.")})))
+      :allow)))
+
+;; =============================================================================
+;; 3. 真实 Agent 运行循环与 Bus 事件转发 (Real Agent Shell Runner)
 ;; =============================================================================
 
 (defn- default-system [workspace]
@@ -111,12 +165,14 @@
                   :tool-result
                   (let [res (get-in evt [:evidence :result])
                         tool-name (get-in evt [:data :tool])
-                        result-str (if (:error res)
-                                     (str "ERROR: " (pr-str (:error res)))
+                        error? (or (:error res) (= (:outcome (:data evt)) :error))
+                        result-str (if error?
+                                     (str "ERROR: " (pr-str (or (:error res) (get-in evt [:data :error-kind]))))
                                      (if (string? res) res (pr-str res)))
                         result-item {:id (str (java.util.UUID/randomUUID))
                                      :role :tool
                                      :tool tool-name
+                                     :error? (boolean error?)
                                      :result result-str}]
                     (swap! session-state update :timeline conj result-item)
                     (broadcast! {:type :timeline/append
@@ -131,11 +187,16 @@
        ;; 4. 真正执行 Agent Run!
        (try
          (let [prev-messages (:messages @session-state)
+               executor (command-executor/default-command-executor
+                         {:authorize web-authorization-policy
+                          :bus b})
                result (agent/run! {:prompt user-prompt
                                    :messages prev-messages
                                    :system system-prompt
                                    :tools registry
                                    :max-turns 10
+                                   :authorization-policy web-authorization-policy
+                                   :command-executor! executor
                                    :bus b})]
            ;; 等待事件消费完毕
            (deref done-promise 5000 false)
@@ -178,8 +239,13 @@
            (bus/close-bus! b)))))))
 
 ;; =============================================================================
-;; 3. WebSocket 消息处理
+;; 4. WebSocket 消息处理
 ;; =============================================================================
+
+(defn- handle-approval-decision! [approval-id approved?]
+  (if-let [p (get @pending-approvals approval-id)]
+    (deliver p (boolean approved?))
+    (println "Warning: no pending approval found for id:" approval-id)))
 
 (defn- handle-client-message! [raw-str]
   (try
@@ -188,6 +254,9 @@
       (case type
         :prompt/submit
         (run-agent-turn! (:text payload))
+
+        :action/decision
+        (handle-approval-decision! (:approval-id payload) (:approved? payload))
 
         (println "Unknown event from client:" event)))
     (catch Exception e
@@ -204,7 +273,7 @@
                   (handle-client-message! msg))}))
 
 ;; =============================================================================
-;; 4. 静态资源路由 (Zero-dependency HTTP Handler)
+;; 5. 静态资源路由 (Zero-dependency HTTP Handler)
 ;; =============================================================================
 
 (def ^:private mime-types
@@ -253,7 +322,7 @@
        :body "Not Found"})))
 
 ;; =============================================================================
-;; 5. 启动入口
+;; 6. 启动入口
 ;; =============================================================================
 
 (defn start-server!
@@ -270,6 +339,9 @@
      (httpkit/run-server app-handler {:ip host :port port}))))
 
 (defn -main [& args]
-  (let [server (start-server!)]
+  (let [opts (if (and (seq args) (map? (first args)))
+               (first args)
+               {})
+        server (start-server! opts)]
     (println "Server running. Press Ctrl+C to stop.")
     @(promise)))
