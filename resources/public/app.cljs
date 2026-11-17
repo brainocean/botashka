@@ -11,6 +11,8 @@
   (r/atom {:connected? false
            :status :idle            ;; :idle | :running | :waiting-approval
            :timeline []             ;; [{:id ... :role :user/:agent/:tool-proposed/:tool/:system ...}]
+           :raw-events []           ;; 完整的底层核心事件流
+           :trace-open? false       ;; 是否展开事件流抽屉面板
            :streaming-text ""       ;; 正在打字输出的临时文本
            :pending-approval nil    ;; {:id ... :tool ... :args ...}
            :workspace "."
@@ -37,6 +39,7 @@
    (fn []
      (when-let [el (js/document.getElementById "content-area")]
        (set! (.-scrollTop el) (.-scrollHeight el))))))
+
 (defn- focus-input! []
   (let [try-focus (fn f [attempts]
                     (if-let [el (js/document.getElementById "prompt-input")]
@@ -53,6 +56,7 @@
     (js/requestAnimationFrame
      (fn []
        (try-focus 15)))))
+
 (defn handle-server-event! [event]
   (let [{:keys [type payload]} event]
     (case type
@@ -70,6 +74,9 @@
       (do
         (swap! app-state update :timeline conj payload)
         (scroll-to-bottom!))
+
+      :event/appended
+      (swap! app-state update :raw-events conj payload)
 
       :run/settled
       (do
@@ -97,8 +104,8 @@
       :config/fast-path-updated
       (swap! app-state assoc :fast-path? (:fast-path? payload))
 
-      (js/console.log "Unhandled event:" (pr-str event)))))
-
+      ;; 兜底未知事件
+      (js/console.log "Unhandled server event:" (pr-str event)))))
 (defn connect-ws! []
   (let [protocol (if (= (.-protocol js/location) "https:") "wss:" "ws:")
         host (.-host js/location)
@@ -134,7 +141,9 @@
   (let [connected? (:connected? @app-state)
         status (:status @app-state)
         ws (:workspace @app-state)
-        fast-path? (:fast-path? @app-state)]
+        fast-path? (:fast-path? @app-state)
+        trace-open? (:trace-open? @app-state)
+        event-count (count (:raw-events @app-state))]
     [:header {:class "app-header"}
      [:hgroup {:style {:margin 0}}
       [:h3 {:style {:margin 0}} "Botashka"]
@@ -147,12 +156,20 @@
                 :on-click (fn []
                             (swap! app-state assoc
                                    :timeline []
+                                   :raw-events []
                                    :streaming-text ""
                                    :pending-approval nil
                                    :status :idle)
                             (send-event! {:type :session/reset})
                             (focus-input!))}
        "✨ New Run"]
+
+      ;; Event Trace 按钮
+      [:button {:class (str "header-btn " (if trace-open? "primary" "outline"))
+                :title "打开/关闭底层事件流监视面板"
+                :on-click (fn [] (swap! app-state update :trace-open? not))}
+       (str "📜 Events" (when (pos? event-count) (str " (" event-count ")")))]
+
       ;; Fast Path Toggle Switch
       [:label {:class "toggle-label" :title "打开/关闭 Clef Fast-Path 双系统决策加速"}
        [:input {:type "checkbox"
@@ -165,6 +182,7 @@
                                              :payload {:enabled? checked?}})))}]
        [:span {:style {:font-weight (if fast-path? "600" "normal")}}
         (if fast-path? "⚡ Fast Path ON" "Fast Path")]]
+
       ;; 连接状态指示
       [:span {:class (str "badge " (if connected? "badge-online" "badge-offline"))}
        (if connected? "🟢 CONNECTED" "🔴 DISCONNECTED")]
@@ -214,6 +232,7 @@
       [:header {:style {:display "flex" :justify-content "space-between"}}
        [:strong "🤖 Botashka"]]
       [:div {:style {:white-space "pre-wrap"}} (:text item)]]
+
      :decision
      [:div {:style {:padding "0.2rem 0"}}
       [:span {:class "badge" :style {:background-color "#6a1b9a" :color "#fff" :margin-right "0.5rem"}}
@@ -232,6 +251,7 @@
           "Fast Path"])]
       [:pre {:style {:margin-top "0.5rem"}}
        [:code (str "Arguments: " (format-tool-args (:args item)))]]]
+
      :tool
      (let [err? (:error? item)]
        [:details {:open (boolean err?)}
@@ -246,7 +266,33 @@
      :system
      [:div
       [:header [:strong {:style {:color "var(--pico-del-color)"}} "⚠️ System"]]
-      [:p {:style {:margin 0 :color "var(--pico-del-color)"}} (:text item)]])])
+      [:p {:style {:margin 0 :color "var(--pico-del-color)"}} (:text item)]]
+
+     ;; 默认未知条目兜底
+     [:div
+      [:pre [:code (pr-str item)]]])])
+(defn event-trace-drawer []
+  (when (:trace-open? @app-state)
+    (let [events (:raw-events @app-state)]
+      [:aside {:class "trace-drawer"}
+       [:div {:class "trace-header"}
+        [:strong (str "📜 Event Stream (" (count events) ")")]
+        [:button {:class "outline header-btn"
+                  :style {:padding "0.1rem 0.4rem !important"}
+                  :on-click (fn [] (swap! app-state assoc :trace-open? false))}
+         "✕ Close"]]
+       [:div {:class "trace-body"}
+        (if (empty? events)
+          [:p {:style {:color "var(--pico-muted-color)" :margin "1rem"}} "暂无事件，发送 Prompt 即可查看流式事件..."]
+          (for [[idx evt] (map-indexed vector events)]
+            [:div {:key idx :class "trace-item"}
+             [:div {:style {:display "flex" :justify-content "space-between"}}
+              [:strong {:style {:color "#58a6ff"}} (str (name (:type evt)))]
+              [:small {:style {:color "var(--pico-muted-color)"}} (str "#" (:seq evt))]]
+             (when (:data evt)
+               [:pre [:code (pr-str (:data evt))]])
+             (when (:evidence evt)
+               [:pre [:code (pr-str (:evidence evt))]])]))]])))
 
 (defn content-view []
   (let [{:keys [timeline streaming-text]} @app-state]
@@ -260,7 +306,8 @@
         [:div {:style {:white-space "pre-wrap"}}
          streaming-text
          [:span {:class "streaming-cursor"}]]])
-     [approval-modal-view]]))
+     [approval-modal-view]
+     [event-trace-drawer]]))
 
 (defn footer-view []
   (let [status (:status @app-state)

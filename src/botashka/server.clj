@@ -20,6 +20,7 @@
 
 (defonce session-state
   (atom {:timeline []             ;; 会话呈现的时间线
+         :raw-events []           ;; 完整的底层核心事件流
          :status :idle             ;; :idle | :running | :waiting-approval
          :streaming-text ""        ;; 正在推过来的临时 token
          :pending-approval nil     ;; 待审批项 {:id ... :tool ... :args ...}
@@ -142,10 +143,13 @@
           (loop []
             (when-let [msg (async/<!! canonical-ch)]
               (let [evt (:payload msg)]
+                ;; 无论何种事件，都存入 raw-events 并实时广播给观察者
+                (swap! session-state update :raw-events conj evt)
+                (broadcast! {:type :event/appended
+                             :payload evt})
                 (case (:type evt)
                   :decision-responded
                   (let [dec-item {:id (str (java.util.UUID/randomUUID))
-                                  :role :decision
                                   :choice (get-in evt [:data :choice])
                                   :decider (get-in evt [:data :decider])
                                   :confidence (get-in evt [:data :confidence])
@@ -287,6 +291,7 @@
         (do
           (swap! session-state assoc
                  :timeline []
+                 :raw-events []
                  :messages []
                  :turn-count 1
                  :streaming-text ""
