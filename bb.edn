@@ -23,18 +23,30 @@
            (chat/chat-loop opts))}
 
   run
-  {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [--clef] [<prompt>]"
+  {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [-f|--fast-path] [--policy <name>] [<prompt>]"
    :override-builtin true
-   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace :g :graph :t :trace :c :clef}
+   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace
+                                                                 :g :graph
+                                                                 :t :trace
+                                                                 :f :fast-path
+                                                                 :c :clef
+                                                                 :p :policy}
                                                          :args->opts [:prompt]
-                                                         :coerce {:graph :boolean :trace :boolean :clef :boolean}})
+                                                         :coerce {:graph :boolean
+                                                                  :trace :boolean
+                                                                  :fast-path :boolean
+                                                                  :clef :boolean
+                                                                  :policy :string}})
                workspace (or (:workspace opts) ".")
                graph? (boolean (or (:graph opts) (:trace opts)))
-               clef? (boolean (:clef opts))
+               policy-name (or (:policy opts)
+                               (when (or (:fast-path opts) (:clef opts)) "fast-path")
+                               "default")
                prompt (or (:prompt opts)
                           "What is the title of the project? Read README.md using available tools.")
                registry (tools/code-tool-registry workspace)
-               policy (if clef?
+               policy (case policy-name
+                        ("fast-path" "clef" "dual-system")
                         (do
                           (require 'botashka.clef-policy)
                           (require 'botashka.run)

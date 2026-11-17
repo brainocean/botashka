@@ -4,12 +4,10 @@
 **测试目标**: 验证 Botashka 在面对探索、分析、动态执行、跨步推理等多轮长调用链场景下，System-1 (Clef 本地快反射) 与 System-2 (Gemini-3.1-flash-lite 慢思考) 的协同效率、置信度门禁、参数安全性及因果追溯透明度。  
 **测试环境**:
 - OS / Arch: macOS (arm64, Darwin 27.2.0)
-- Runtime: Babashka / Clojure 1.12
+- CLI 参数: `bb run -g -f` / `--fast-path`（支持 `--policy fast-path`，向后兼容 `-c`/`--clef`）
 - Local Decider (System-1): `Cloudflare_clef-flash-Q4_K_M.gguf` (本地 HTTP API)
 - Primary LLM (System-2): `gemini-3.1-flash-lite` (通过 OpenAI-compatible proxy)
 - 门禁阈值: `min-probability: 0.70`
-
----
 
 ## 总体测试结果汇总
 
@@ -30,8 +28,7 @@
 - **Prompt**:  
   `"查找项目中哪些文件直接引用了 tool-runtime，并说明它们各自使用了其中的什么函数？"`
 - **测试命令**:  
-  `bb run -g -c "查找项目中哪些文件直接引用了 tool-runtime，并说明它们各自使用了其中的什么函数？"`
-
+  `bb run -g -f "查找项目中哪些文件直接引用了 tool-runtime，并说明它们各自使用了其中的什么函数？"`
 ```text
 ======================== Execution Trace Graph ========================
 ┌── [0] :run-started (turn: 0)
@@ -178,10 +175,8 @@
 ### 用例 2：测试覆盖与架构对比型
 
 - **Prompt**:  
-  `"检查目前 test/ 目录下所有的测试命名空间，告诉我一共覆盖了哪些核心功能，有哪些在 src/ 里的模块还没有对应的测试？"`
 - **测试命令**:  
-  `bb run -g -c "检查目前 test/ 目录下所有的测试命名空间，告诉我一共覆盖了哪些核心功能，有哪些在 src/ 里的模块还没有对应的测试？"`
-
+  `bb run -g -f "检查目前 test/ 目录下所有的测试命名空间，告诉我一共覆盖了哪些核心功能，有哪些在 src/ 里的模块还没有对应的测试？"`
 ```text
 ======================== Execution Trace Graph ========================
 ┌── [0] :run-started (turn: 0)
@@ -355,7 +350,7 @@
 - **Prompt**:  
   `"运行测试命令看当前测试是否全绿，并告诉我测试一共跑了多少个断言（assertions），耗时是多少？"`
 - **测试命令**:  
-  `bb run -g -c "运行测试命令看当前测试是否全绿，并告诉我测试一共跑了多少个断言（assertions），耗时是多少？"`
+  `bb run -g -f "运行测试命令看当前测试是否全绿，并告诉我测试一共跑了多少个断言（assertions），耗时是多少？"`
 
 ```text
 ======================== Execution Trace Graph ========================
@@ -478,7 +473,7 @@
 - **Prompt**:  
   `"查看最近 3 次 git commit 记录，并详细对比最新一次 commit 究竟改动了哪几个文件以及核心变更点是什么？"`
 - **测试命令**:  
-  `bb run -g -c "查看最近 3 次 git commit 记录，并详细对比最新一次 commit 究竟改动了哪几个文件以及核心变更点是什么？"`
+  `bb run -g -f "查看最近 3 次 git commit 记录，并详细对比最新一次 commit 究竟改动了哪几个文件以及核心变更点是什么？"`
 
 ```text
 ======================== Execution Trace Graph ========================
@@ -601,7 +596,7 @@
 - **Prompt**:  
   `"盘点 tools/ 目录下每个工具脚本的名称和功能，并找出哪一个工具的代码行数最长？"`
 - **测试命令**:  
-  `bb run -g -c "盘点 tools/ 目录下每个工具脚本的名称和功能，并找出哪一个工具的代码行数最长？"`
+  `bb run -g -f "盘点 tools/ 目录下每个工具脚本的名称和功能，并找出哪一个工具的代码行数最长？"`
 
 ```text
 ======================== Execution Trace Graph ========================
