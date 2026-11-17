@@ -35,12 +35,15 @@
         (if-not (fs/directory? canonical-ws)
           {:error {:kind :invalid-workspace
                    :workspace workspace}}
-          (let [{:keys [exit out err]}
-                (process/shell {:dir (str canonical-ws)
-                                :out :string
-                                :err :string
-                                :continue true}
-                               command)]
+          (let [shell-cmd (if (fs/windows?)
+                            ["cmd.exe" "/c" command]
+                            ["/bin/sh" "-c" command])
+                {:keys [exit out err]}
+                (apply process/shell {:dir (str canonical-ws)
+                                      :out :string
+                                      :err :string
+                                      :continue true}
+                       shell-cmd)]
             {:exit exit
              :out (truncate-output out max-output-characters)
              :err (truncate-output err max-output-characters)})))

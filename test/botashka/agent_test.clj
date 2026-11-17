@@ -741,8 +741,8 @@
           last-msg (last (:messages ctx))]
       (is (= 2 (count (:messages ctx))))
       (is (= "user" (:role last-msg)))
-      (is (.contains (:content last-msg) "considered `read_file` (confidence: 52%)"))
-      (is (.contains (:content last-msg) "Handing over to primary model"))))
+      (is (.contains (:content last-msg) "evaluated `read_file` (52% confidence)"))
+      (is (.contains (:content last-msg) "deferred to you for strategic reasoning"))))
 
   (testing "Decision no_tool injects no-tool context to System 2"
     (let [run (-> (run/new-run {:run-id "r-no-tool" :max-turns 5})
@@ -759,7 +759,7 @@
           ctx (run/build-model-context run)
           last-msg (last (:messages ctx))]
       (is (= 2 (count (:messages ctx))))
-      (is (.contains (:content last-msg) "determined no immediate tool is needed (confidence: 90%)")))))
+      (is (.contains (:content last-msg) "determined no immediate tool is needed (90% confidence)")))))
 
 (deftest clef-policy-rejects-read-file-when-target-cannot-be-extracted
   (testing "Even if Clef predicts read_file with high confidence, missing target falls back to LLM"

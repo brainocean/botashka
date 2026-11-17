@@ -4,8 +4,10 @@
  {:requires ([babashka.cli :as cli]
              [botashka.agent :as agent]
              [botashka.chat :as chat]
+             [botashka.environment :as environment]
              [botashka.tools :as tools]
              [botashka.trace :as trace]
+             [clojure.string :as str]
              [clojure.test :refer [run-tests]])
 
   test
@@ -25,25 +27,23 @@
   run
   {:doc "Runs the agent with an optional prompt and workspace: bb run [-w <dir>] [-g] [-f|--fast-path] [--policy <name>] [<prompt>]"
    :override-builtin true
-   :task (let [opts (cli/parse-opts *command-line-args* {:alias {:w :workspace
-                                                                 :g :graph
-                                                                 :t :trace
-                                                                 :f :fast-path
-                                                                 :c :clef
-                                                                 :p :policy}
-                                                         :args->opts [:prompt]
-                                                         :coerce {:graph :boolean
-                                                                  :trace :boolean
-                                                                  :fast-path :boolean
-                                                                  :clef :boolean
-                                                                  :policy :string}})
+   :task (let [spec {:workspace {:alias :w :coerce :string}
+                     :graph {:alias :g :coerce :boolean}
+                     :trace {:alias :t :coerce :boolean}
+                     :fast-path {:alias :f :coerce :boolean}
+                     :clef {:alias :c :coerce :boolean}
+                     :policy {:alias :p :coerce :string}}
+               parsed (cli/parse-args *command-line-args* {:spec spec})
+               opts (:opts parsed)
+               args (:args parsed)
                workspace (or (:workspace opts) ".")
                graph? (boolean (or (:graph opts) (:trace opts)))
                policy-name (or (:policy opts)
                                (when (or (:fast-path opts) (:clef opts)) "fast-path")
                                "default")
-               prompt (or (:prompt opts)
+               prompt (or (when (seq args) (str/join " " args))
                           "What is the title of the project? Read README.md using available tools.")
+               system-prompt (environment/default-system-prompt (environment/detect-os) workspace)
                registry (tools/code-tool-registry workspace)
                policy (case policy-name
                         ("fast-path" "clef" "dual-system")
@@ -54,7 +54,9 @@
                            ((resolve 'botashka.clef-policy/clef-action-policy) {:min-probability 0.70})
                            (resolve 'botashka.run/default-action-policy)))
                         nil)
-               run-opts (cond-> {:prompt prompt :tools registry}
+               run-opts (cond-> {:prompt prompt
+                                 :system system-prompt
+                                 :tools registry}
                           policy (assoc :action-policy policy))
                result (agent/run! run-opts)]
            (when graph?

@@ -10,19 +10,19 @@
                last-decision)
       (let [{:keys [choice confidence probability decider]} last-decision
             conf (or confidence probability)
-            conf-str (when conf (str " (confidence: " (int (* 100 conf)) "%)"))]
+            conf-str (when conf (str " (" (int (* 100 conf)) "% confidence)"))]
         (cond
           (= choice "no_tool")
           {:role "user"
-           :content (str "[System Context: Fast-path decider `" (or decider "clef")
+           :content (str "[Internal Note: Fast-path decider `" (or decider "clef")
                          "` determined no immediate tool is needed" conf-str
-                         ". Proceeding with full reasoning.]")}
+                         ". Please focus on directly answering the user's explicit request based on available facts.]")}
 
           (seq choice)
           {:role "user"
-           :content (str "[System Context: Fast-path decider `" (or decider "clef")
-                         "` considered `" choice "`" conf-str
-                         ", but confidence was below threshold. Handing over to primary model for strategic reasoning.]")})))))
+           :content (str "[Internal Note: Fast-path decider `" (or decider "clef")
+                         "` evaluated `" choice "`" conf-str
+                         ", but deferred to you for strategic reasoning. Please execute any needed commands or directly answer the user's request without commenting on this internal routing note.]")})))))
 
 (defn build-model-context
   "Purely projects the model invocation parameters (context projection) from current run state,
