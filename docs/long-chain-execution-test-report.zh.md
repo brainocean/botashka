@@ -20,7 +20,81 @@
 | **Case 5** | 结构盘点 | 盘点 `tools/` 脚本功能，统计哪一个代码行数最长 | 31 步 | 4 轮 | 10.84s | ✅ 成功 | 目录扫描 $\to$ 命令失败自纠错（处理通配符） $\to$ 精确提取行数（90行） |
 
 ---
+## 对比分析：开启 `-f` (Fast-path) vs 关闭 `-f` (纯 LLM 基线)
 
+为了定量与定性评估 System-1 快反射引入后的收益、开销以及交互差异，我们在完全相同的代码仓库和环境下，选取 3 类典型用例进行了成对对照实验：
+
+### 1. 成对测试量化对比表
+
+| 用例场景 | 开启 `-f` (Fast-path) | 关闭 `-f` (纯 LLM 基线) | 步数对比 (Steps) | 耗时对比 (Wall Time) | LLM 调用轮数对比 | 结论与分析 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **场景 A: 单步确定性读取**<br>`"README 里面写了什么内容？"` | **9 步**<br>(耗时 1.92s) | **13 步**<br>(耗时 2.89s) | **减少 4 步 (-31%)** | **提速 33.5%**<br>(节省约 1.0s) | 1 次 vs 3 次<br>(**节省 67% LLM 调用**) | **显著胜出**：Fast-path 毫秒级命中 `read_file`，完全跳过 LLM 摸索与列目录 |
+| **场景 B: 混合探索与状态判断**<br>`"当前项目根目录下哪个文件最新？"` | **25 步**<br>(耗时 7.57s) | **13 步**<br>(耗时 3.05s) | 增加 12 步<br>(含 4 次前置判定) | 耗时增加 4.5s<br>(因 Clef 轮询开销) | 4 次 vs 3 次 | **开销权衡**：涉及动态 shell 执行时，Clef 虽准确判断分类但无法提取动态命令参数，增加了前置判定开销 |
+| **场景 C: 多步复杂动态命令**<br>`"查看最近 3 次 git commit 记录并对比最新一次变更"` | **25 步**<br>(耗时 10.25s) | **17 步**<br>(耗时 5.28s) | 增加 8 步<br>(含 4 次前置判定) | 耗时增加 4.9s | 4 次 vs 4 次 | **策略稳定性胜出**：两者 LLM 轮次一致，`-f` 赋予了每一步强有力的前置意图锚定，Trace 具备 100% 因果透明度 |
+
+---
+
+### 2. 核心架构收益与权衡 (Trade-offs)
+
+1. **高频已知意图“降维打击” (场景 A)**:
+   - 纯 LLM 模式下：提问 $\to$ LLM 犹豫先 `list_files` $\to$ 拿到文件列表 $\to$ LLM 决定 `read_file` $\to$ 拿到内容 $\to$ LLM 输出答案（共耗费 3 次云端 LLM 调用，延迟近 3 秒）；
+   - 开启 `-f` 模式下：提问 $\to$ Clef 在 800ms 内直接预执行 `read_file` $\to$ LLM 一次性总结回答（**仅 1 次云端 LLM 调用，耗时仅 1.92 秒**）。
+2. **多步动态命令的延迟开销 (场景 B & C)**:
+   - 由于当前 Fast-path 只在本地支持推断简单工具（如 `list_files`, `read_file`），对于复杂的动态 shell 命令（如 `git log -n 3`, `wc -l`），Clef 能准确判断出类别为 `run_command`（92%~95%），但无法从纯文本中提取具体命令字符串；
+   - 这导致每轮多了一次 `~800ms` 的本地分类开销，随后依然交由 LLM 生成具体命令。
+   - **未来优化契机**：后续做工具自沉淀时，一旦高频命令（如 `git_log`）被固化为带 schema 的专用工具，Fast-path 将直接在本地秒级命中，消除该开销。
+
+---
+
+### 3. 打开 `-f` 之后：Event 流中需要重点关注的关键步骤
+
+在开启 `-f` 的 Trace 树中，有四类至关重要的事件与步骤，是审计双脑协同行为的核心观测点：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 用户
+    participant SM as 状态机 (Core)
+    participant Clef as System-1 (Fast-path)
+    participant Tool as 本地工具 (Babashka)
+    participant LLM as System-2 (Gemini)
+
+    User->>SM: 提问
+    Note over SM: 状态: :awaiting-model
+    SM->>Clef: 派发 :decision/complete [关注点 1: 前置反射]
+    Clef-->>SM: 返回 :decision-responded (choice, confidence)
+    
+    alt 置信度 >= 70% 且参数有效 (如场景 A)
+        Note over SM: [关注点 2: 动作快捕获] origin: :decision
+        SM->>Tool: 执行工具
+        Tool-->>SM: 产出 :tool-result
+        Note over SM: 状态转移: :awaiting-model
+        SM->>LLM: 带入快路径观察事实 [关注点 4: 上下文注入]
+        LLM-->>User: 一次性输出答案 (节约 2 轮 LLM)
+    else 置信度 < 70% 或 动态命令无静态参数 (如场景 B/C)
+        Note over SM: [关注点 3: 门禁安全退避]
+        SM->>LLM: 移交主模型 (附带决策退避事实摘要)
+        LLM->>Tool: LLM 慢思考生成精细参数并执行
+    end
+```
+
+#### 核心观测点清单：
+
+1. **`[关注点 1] :decision-requested` 与 `:decision-responded` 对称对**：
+   - **看什么**：关注 `turn: 0` 时 Clef 给出的 `choice` 和 `confidence`（例如 `read_file (97%)` 或 `run_command (92%)`）。
+   - **意义**：这是 System-1 的直觉神经，展示了本地小模型对用户意图的初速度。
+2. **`[关注点 2] :tool-proposed [origin: decision]`**：
+   - **看什么**：工具调用的 `origin` 标记是 `:decision` 还是 `:model`。
+   - **意义**：如果标记为 `origin: decision`，说明该工具**完全绕过了云端 LLM，由本地快路径直接零成本斩获数据**！
+3. **`[关注点 3] 门禁退避 (Handoff Fallback)`**：
+   - **看什么**：当 `:decision-responded` 给出较低概率（如 45%）或者没有有效参数时，下一步紧接着的是 `:model-requested` 而不是盲目执行工具。
+   - **意义**：证明门禁机制正常生效，没有发生类似于“擅自去读 README”的胡乱决策。
+4. **`[关注点 4] 上下文注入与因果归因 (Observation Injection)`**：
+   - **看什么**：随后发给 LLM 的 `:model-requested` 消息体中，是否包含带来源的声明：
+     ```text
+     [Observation: Tool `read_file` was pre-executed by Fast-path decider `clef-flash` (97% confidence) ...]
+     ```
+   - **意义**：LLM 看到这一条事实，便知道数据已经提前拿回，无需再重复发起该工具调用。
 ## 详细用例与完整 Execution Trace Graph
 
 ### 用例 1：跨文件依赖溯源型

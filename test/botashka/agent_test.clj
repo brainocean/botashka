@@ -655,9 +655,10 @@
       (is (= "Bus " (:payload t1)))
       (is (= "pong" (:payload t2))))
     ;; Check canonical events on bus
-    (let [canonical-events (atom [])]
+    (let [canonical-events (atom [])
+          timeout-ms 200]
       (loop []
-        (let [v (async/poll! canonical-ch)]
+        (let [[v _] (async/alts!! [canonical-ch (async/timeout timeout-ms)])]
           (when v
             (swap! canonical-events conj (get-in v [:payload :type]))
             (recur))))
