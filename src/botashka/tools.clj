@@ -47,18 +47,22 @@
                                              :parameters provider-schema}}
                          :run (fn [arguments]
                                 (if-not (m/validate parameters arguments)
-                                  {:error {:kind :invalid-arguments
-                                           :tool name
-                                           :details (me/humanize (m/explain parameters arguments))
-                                           :explain (m/explain parameters arguments)}}
+                                  (let [explanation (m/explain parameters arguments)]
+                                    {:error {:kind :invalid-arguments
+                                             :tool name
+                                             :details (me/humanize explanation)
+                                             :errors (mapv #(select-keys % [:path :in :type :value])
+                                                           (:errors explanation))}})
                                   (let [result (tool-runtime/run! program
                                                                   (assoc arguments :workspace workspace))]
                                     (if (and returns (not (m/validate returns result)))
-                                      {:error {:kind :invalid-tool-output-contract
-                                               :tool name
-                                               :details (me/humanize (m/explain returns result))
-                                               :explain (m/explain returns result)
-                                               :raw-output result}}
+                                      (let [explanation (m/explain returns result)]
+                                        {:error {:kind :invalid-tool-output-contract
+                                                 :tool name
+                                                 :details (me/humanize explanation)
+                                                 :errors (mapv #(select-keys % [:path :in :type :value])
+                                                               (:errors explanation))
+                                                 :raw-output result}})
                                       result))))}]})
         {:error {:kind :invalid-tool-metadata
                  :program program

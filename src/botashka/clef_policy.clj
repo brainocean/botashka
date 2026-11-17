@@ -34,10 +34,12 @@
                              (filter #(= (:role %) "user"))
                              last
                              :content)
-                        "")]
+                        "")
+        detected-readme? (re-find #"(?i)readme" user-prompt)]
     (case choice
       "list_files" {:path "."}
       "search_text" {:query user-prompt}
+      "read_file" {:path (if detected-readme? "README.md" "")}
       {})))
 
 (defn clef-action-policy
