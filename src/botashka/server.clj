@@ -283,10 +283,20 @@
           (swap! session-state assoc :fast-path? enabled?)
           (broadcast! {:type :config/fast-path-updated
                        :payload {:fast-path? enabled?}}))
+        :session/reset
+        (do
+          (swap! session-state assoc
+                 :timeline []
+                 :messages []
+                 :turn-count 1
+                 :streaming-text ""
+                 :pending-approval nil
+                 :status :idle)
+          (broadcast! {:type :session/sync
+                       :payload (dissoc @session-state :messages)}))
 
         :action/decision
         (handle-approval-decision! (:approval-id payload) (:approved? payload))
-
         (println "Unknown event from client:" event)))
     (catch Exception e
       (println "Failed to parse client message:" raw-str e))))

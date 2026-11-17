@@ -45,9 +45,18 @@ html, body {
 .header-controls {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
+/* Header 操作按钮 (如 New Run) */
+.header-btn {
+  padding: 0.25rem 0.6rem !important;
+  font-size: 0.8rem !important;
+  margin: 0 !important;
+  height: auto !important;
+  white-space: nowrap !important;
+  cursor: pointer;
+}
 /* Fast-Path 开关控件 */
 .toggle-label {
   display: inline-flex;

@@ -140,6 +140,19 @@
       [:h3 {:style {:margin 0}} "Botashka"]
       [:small {:style {:margin 0 :color "var(--pico-muted-color)"}} (str "Workspace: " ws)]]
      [:div {:class "header-controls"}
+      ;; New Run 按钮
+      [:button {:class "outline header-btn"
+                :title "清空当前会话并开启全新的 Run"
+                :disabled (= status :running)
+                :on-click (fn []
+                            (swap! app-state assoc
+                                   :timeline []
+                                   :streaming-text ""
+                                   :pending-approval nil
+                                   :status :idle)
+                            (send-event! {:type :session/reset})
+                            (focus-input!))}
+       "✨ New Run"]
       ;; Fast Path Toggle Switch
       [:label {:class "toggle-label" :title "打开/关闭 Clef Fast-Path 双系统决策加速"}
        [:input {:type "checkbox"
